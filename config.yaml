@@ -1,0 +1,52 @@
+# Obsidian Knowledge Import Hub - Configuration
+# All paths, engines, thresholds, and processing settings
+
+vault:
+  root: "D:/test-temp/ocr_output"
+  raw_folder: "00-RAW"
+  wiki_base: "10-WIKI"
+  audit_folder: "99-Audit/OCR-Pending"
+  archive_folder: "99-Archive"
+
+processing:
+  watch_delay_seconds: 5
+  max_worker_threads: 2
+  confidence_threshold: 0.85
+  skip_patterns: ["**/.*", "**/*.tmp"]
+
+ocr:
+  engines:
+    text_default: "paddleocr_vl"
+    table_complex: "paddleocr_vl"
+    math_special: "mathpix_api"
+  mathpix_api_key: ""
+  paddleocr:
+    lang: "ch"
+    use_angle_cls: true
+    det_limit_side_len: 1920
+    det_db_thresh: 0.2
+    det_db_box_thresh: 0.5
+    det_db_unclip_ratio: 1.8
+    drop_score: 0.35
+  table_structure:
+    enabled: true
+    lang: "ch"
+    recovery: true
+    show_log: false
+  ollama:
+    model: "qwen2.5:1.5b"
+    endpoint: "http://localhost:11434"
+
+image:
+  super_resolution:
+    model: "real-esrgan"
+    scale: 2
+  color_extraction:
+    kmeans_clusters: 8
+  table_detection:
+    use_model: "paddle_layout"
+
+logging:
+  level: "INFO"
+  file: "logs/pipeline.log"
+  format: "json"

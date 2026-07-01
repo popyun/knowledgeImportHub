@@ -1,0 +1,34 @@
+image:
+  color_extraction:
+    kmeans_clusters: 8
+  super_resolution:
+    model: real-esrgan
+    scale: 2
+  table_detection:
+    use_model: paddle_layout
+logging:
+  file: D:/test-temp/ocr_output/logs/pipeline.log
+  format: json
+  level: INFO
+ocr:
+  engines:
+    math_special: mathpix_api
+    table_complex: paddleocr_vl
+    text_default: paddleocr_vl
+  mathpix_api_key: ''
+  ollama:
+    endpoint: http://localhost:11434
+    model: qwen2.5:1.5b
+processing:
+  confidence_threshold: 0.85
+  max_worker_threads: 1
+  skip_patterns:
+  - '**/.*'
+  - '**/*.tmp'
+  watch_delay_seconds: 2
+vault:
+  archive_folder: 99-Archive
+  audit_folder: 99-Audit/OCR-Pending
+  raw_folder: 00-RAW
+  root: D:/test-temp/ocr_output
+  wiki_base: 10-WIKI

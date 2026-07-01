@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Logs and runtime output
+logs/
+*.log
+*.tmp
+*.temp
+
+# Local OCR/runtime artifacts
+*.db
+*.sqlite
+*.sqlite3
+progress.json
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Secrets/local config overrides
+.env
+.env.*
+*.local.yaml
+*.local.yml
