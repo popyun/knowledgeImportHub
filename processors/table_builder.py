@@ -98,12 +98,19 @@ class TableBuilder(BaseHandler):
 
         rows = self._organize_cells_into_rows(blocks)
         rows_with_multiple = [row for row in rows if len(row) >= 2]
-        max_cols = max((len(row) for row in rows), default=0)
-
-        if len(rows_with_multiple) < 2 or max_cols < 2:
+        if len(rows_with_multiple) < 3:
             return []
 
-        sorted_blocks = [cell for row in rows for cell in row]
+        col_counts = [len(row) for row in rows_with_multiple]
+        main_col_count = max(set(col_counts), key=col_counts.count)
+        consistent_rows = [row for row in rows_with_multiple if abs(len(row) - main_col_count) <= 1]
+
+        if main_col_count < 3 or len(consistent_rows) < 3:
+            return []
+        if len(consistent_rows) / len(rows_with_multiple) < 0.6:
+            return []
+
+        sorted_blocks = [cell for row in consistent_rows for cell in row]
         return [sorted_blocks]
 
 

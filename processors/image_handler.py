@@ -145,27 +145,30 @@ class ImageHandler(BaseHandler):
         blocks: List[Dict[str, Any]],
         content_type: ContentType
     ) -> List[Dict[str, Any]]:
-        """Infer a single table region from OCR block geometry."""
+        """Infer table regions only for grid-like OCR block groups."""
         if content_type not in {ContentType.SIMPLE_TABLE, ContentType.COMPLEX_TABLE, ContentType.MIXED}:
             return []
-        boxes = [block.get("bbox") for block in blocks if block.get("bbox")]
-        if len(boxes) < 4:
-            return []
-        xs = [point[0] for box in boxes for point in box]
-        ys = [point[1] for box in boxes for point in box]
-        min_x, max_x = int(max(min(xs), 0)), int(max(xs))
-        min_y, max_y = int(max(min(ys), 0)), int(max(ys))
-        width = max(max_x - min_x, 1)
-        height = max(max_y - min_y, 1)
-        padding = 8
-        return [{
-            "bbox": (
-                max(min_x - padding, 0),
-                max(min_y - padding, 0),
-                width + padding * 2,
-                height + padding * 2,
-            )
-        }]
+        table_groups = self.table_builder._group_blocks_into_tables(blocks)
+        regions = []
+        for group in table_groups:
+            boxes = [block.get("bbox") for block in group if block.get("bbox")]
+            if not boxes:
+                continue
+            xs = [point[0] for box in boxes for point in box]
+            ys = [point[1] for box in boxes for point in box]
+            min_x, max_x = int(max(min(xs), 0)), int(max(xs))
+            min_y, max_y = int(max(min(ys), 0)), int(max(ys))
+            padding = 8
+            regions.append({
+                "bbox": (
+                    max(min_x - padding, 0),
+                    max(min_y - padding, 0),
+                    max(max_x - min_x, 1) + padding * 2,
+                    max(max_y - min_y, 1) + padding * 2,
+                )
+            })
+        return regions
+
 
 
     def cleanup(self) -> None:

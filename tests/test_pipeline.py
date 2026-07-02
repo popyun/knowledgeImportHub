@@ -125,14 +125,20 @@ class TestTableBuilder:
         cells = [
             {"text": "A1", "confidence": 0.9, "bbox": [[0, 0], [50, 0], [50, 30], [0, 30]]},
             {"text": "B1", "confidence": 0.9, "bbox": [[50, 0], [100, 0], [100, 30], [50, 30]]},
+            {"text": "C1", "confidence": 0.9, "bbox": [[100, 0], [150, 0], [150, 30], [100, 30]]},
             {"text": "A2", "confidence": 0.9, "bbox": [[0, 30], [50, 30], [50, 60], [0, 60]]},
             {"text": "B2", "confidence": 0.9, "bbox": [[50, 30], [100, 30], [100, 60], [50, 60]]},
+            {"text": "C2", "confidence": 0.9, "bbox": [[100, 30], [150, 30], [150, 60], [100, 60]]},
+            {"text": "A3", "confidence": 0.9, "bbox": [[0, 60], [50, 60], [50, 90], [0, 90]]},
+            {"text": "B3", "confidence": 0.9, "bbox": [[50, 60], [100, 60], [100, 90], [50, 90]]},
+            {"text": "C3", "confidence": 0.9, "bbox": [[100, 60], [150, 60], [150, 90], [100, 90]]},
         ]
         
         # Create color map
         color_map = [
-            ["#FF0000", "#00FF00"],
-            ["#0000FF", "#FFFF00"]
+            ["#FF0000", "#00FF00", "#FFFFFF"],
+            ["#0000FF", "#FFFF00", "#FFFFFF"],
+            ["#FFFFFF", "#FFFFFF", "#FFFFFF"]
         ]
         
         # Build table

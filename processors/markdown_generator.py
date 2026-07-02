@@ -139,26 +139,62 @@ ocr_confidence: {confidence:.2f}
         filename = source_path.split("/")[-1].split("\\")[-1]
         return filename.rsplit(".", 1)[0]
     
+    def _block_metrics(self, block: Dict[str, Any]) -> Dict[str, float]:
+        """Return bbox metrics for reading-order reconstruction."""
+        bbox = block.get("bbox") or [[0, 0], [0, 0], [0, 0], [0, 0]]
+        xs = [point[0] for point in bbox]
+        ys = [point[1] for point in bbox]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        return {
+            "min_x": min_x,
+            "max_x": max_x,
+            "min_y": min_y,
+            "max_y": max_y,
+            "center_y": (min_y + max_y) / 2,
+            "height": max(max_y - min_y, 1),
+        }
+
     def _generate_body_text(self, blocks: List[Dict[str, Any]]) -> str:
-        """
-        Generate body text from OCR blocks.
-        
-        Args:
-            blocks: OCR blocks
-            
-        Returns:
-            Body text string
-        """
-        text_blocks = []
-        
-        for block in blocks:
-            if block.get("type") == "text":
-                text = block.get("text", "")
-                if text.strip():
-                    text_blocks.append(text.strip())
-        
-        return "\n\n".join(text_blocks)
-    
+        """Generate body text while preserving visual reading order."""
+        text_blocks = [block for block in blocks if block.get("type") == "text" and block.get("text", "").strip()]
+        if not text_blocks:
+            return ""
+
+        heights = sorted(self._block_metrics(block)["height"] for block in text_blocks)
+        median_height = heights[len(heights) // 2]
+        row_tolerance = max(median_height * 0.7, 8)
+        paragraph_gap = max(median_height * 1.8, 18)
+
+        rows = []
+        for block in sorted(text_blocks, key=lambda b: self._block_metrics(b)["center_y"]):
+            metrics = self._block_metrics(block)
+            if not rows:
+                rows.append([block])
+                continue
+            current_row = rows[-1]
+            row_center = sum(self._block_metrics(item)["center_y"] for item in current_row) / len(current_row)
+            if abs(metrics["center_y"] - row_center) <= row_tolerance:
+                current_row.append(block)
+            else:
+                rows.append([block])
+
+        lines = []
+        previous_bottom = None
+        for row in rows:
+            row.sort(key=lambda b: self._block_metrics(b)["min_x"])
+            row_text = " ".join(block.get("text", "").strip() for block in row if block.get("text", "").strip())
+            if not row_text:
+                continue
+            row_top = min(self._block_metrics(block)["min_y"] for block in row)
+            if previous_bottom is not None and row_top - previous_bottom > paragraph_gap:
+                lines.append("")
+            lines.append(row_text)
+            previous_bottom = max(self._block_metrics(block)["max_y"] for block in row)
+
+        return "\n".join(lines)
+
+
     def _generate_tables_section(self, tables: List[Dict[str, Any]]) -> str:
         """
         Generate HTML tables section.
