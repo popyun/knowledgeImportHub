@@ -157,12 +157,21 @@ ocr_confidence: {confidence:.2f}
             row_center_y = sum(metric["center_y"] for metric in row_metrics) / len(row_metrics)
             relative_y = (row_center_y - page_top) / page_height
             # Prefer larger-than-body font near the top; ignore tiny/very long lines.
-            score = (row_height / max(median_height, 1)) * 60
+            # Cap the font ratio so a single outlier-tall block (e.g. a merged
+            # multi-line cell) cannot dominate scoring.
+            height_ratio = min(row_height / max(median_height, 1), 3.0)
+            score = height_ratio * 60
             score += max(0, 40 - relative_y * 80)
-            if 6 <= len(row_text) <= 60:
+            if 6 <= len(row_text) <= 40:
                 score += 15
             if row_height < median_height * 1.1:
                 score -= 40
+            # A title is a few large blocks, not a wide band of many cells.
+            # Penalize table-header-like rows (many blocks / long merged text).
+            if len(row) >= 4:
+                score -= 25 * (len(row) - 3)
+            if len(row_text) > 45:
+                score -= (len(row_text) - 45) * 1.5
             candidates.append((score, row_y, row_text))
 
         if candidates:

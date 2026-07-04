@@ -1,6 +1,6 @@
 ﻿# TASK_STATUS
 
-更新时间：2026-07-04 Asia/Shanghai
+更新时间：2026-07-04 Asia/Shanghai（迭代二）
 
 ## 1. 当前状态
 
@@ -112,6 +112,13 @@ python -c "import io; print(io.open(r'D:\test-temp\ocr_output\99-Audit\OCR-Pendi
 - 个别单元格因 OCR bbox 定位偏差仍有轻微错位/合并。
 - 少数被 OCR 拆成多段的长句偶尔并入相邻区域。
 - 页脚版权长句已进过滤审核区，属预期。
+
+## 7.1 本轮修复（2026-07-04 迭代二）
+
+- 修复非 ASCII 路径读图失败：`processors/preprocessor.py` 新增 `_imread_unicode`，用 `np.fromfile` + `cv2.imdecode` 读取，替换 `cv2.imread`。此前中文文件名（如 `微信图片_*.jpg`）会 `Failed to read image`，现已可正常处理并发布。
+- 修复标题串行拼接错误：`_extract_title` 评分改进——字号比值上限 3.0，避免单个超高块（多行合并单元格）霸榜；对块数 >=4 的宽表头行按 `25*(len-3)` 降权、文本长度 >45 按 `1.5/字` 降权；有效标题长度窗口收紧为 6-40 字。样例 `微信图片_20240825121238` 标题由整行表头串（“…隐含波动以发行人信…”）纠正为 `敏感度资本计量 一计算步骤（续）`。
+- 抽样测试：`D:/test-temp/png` 取 `微信图片_20240825121053/121154/121238.jpg` 三张，经完整链路发布到 `D:/test-temp/ocr_output/99-Audit/OCR-Pending/2026-07-04_微信图片_*.md`；参考样例 `test_20240825121121` 无回归；`pytest tests/ -q` = 16 passed。
+- 残留：多风险因子矩阵型幻灯片（大跨度网格）因 OCR bbox 精度，左右并排的独立小表仍会并入同一区域，列错位偏多；属后续区域拆分优化项，未在本轮修改分割阈值以避免参考样例回归。
 
 ## 8. Git
 

@@ -23,6 +23,17 @@ class ImagePreprocessor(BaseHandler):
         super().__init__(config)
         self.scale = config.get("image", {}).get("super_resolution", {}).get("scale", 2)
     
+    @staticmethod
+    def _imread_unicode(image_path: str):
+        """Read an image while tolerating non-ASCII (e.g. Chinese) file paths on Windows."""
+        try:
+            data = np.fromfile(image_path, dtype=np.uint8)
+        except (OSError, ValueError):
+            return None
+        if data.size == 0:
+            return None
+        return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
     def process(self, image_path: str) -> Dict[str, Any]:
         """
         Process an image through the preprocessing pipeline.
@@ -33,8 +44,8 @@ class ImagePreprocessor(BaseHandler):
         Returns:
             Dictionary with processed image and metadata
         """
-        # Read image
-        image = cv2.imread(image_path)
+        # Read image (Unicode-safe: cv2.imread fails on non-ASCII paths on Windows)
+        image = self._imread_unicode(image_path)
         if image is None:
             raise ValueError(f"Failed to read image: {image_path}")
         
