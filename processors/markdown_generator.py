@@ -65,6 +65,11 @@ class MarkdownGenerator(BaseHandler):
         title_heading = f"# {title}" if title else ""
         body_text = self._generate_body_text(content_blocks, title)
 
+        # Drop external tables whose cell text is already rendered in the body
+        # (fallback table_builder sometimes wraps a multi-column *text* slide as
+        # one table, duplicating the reconstructed body content).
+        tables = self._drop_body_duplicate_tables(tables, content_blocks)
+
         # Generate tables section
         tables_html = self._generate_tables_section(tables)
 
@@ -185,18 +190,35 @@ ocr_confidence: {confidence:.2f}
         """Return True for UI toolbar or footer OCR noise."""
         return self._noise_kind(text) is not None
 
-    def _noise_kind(self, text: str) -> Optional[str]:
+    def _noise_kind(self, text: str, in_margin: bool = True) -> Optional[str]:
         """Classify OCR text as a kind of noise, or None when it is content."""
         compact = re.sub(r"\s+", "", text)
         if not compact:
             return "empty"
-        toolbar_terms = (
-            "填充", "查找", "替换", "搜索", "菜单", "工具", "视图", "帮助",
-            "开始", "插入", "设计", "切换", "动画", "放映", "审阅",
-            "文件", "编辑", "格式", "缩放", "批注", "共享", "登录",
-            "智能图形", "选择", "另存为", "打印", "导出", "幻灯片",
+        # Unambiguous UI/menu tokens: treat as toolbar noise anywhere on the page.
+        strong_terms = (
+            "智能图形", "另存为", "幻灯片", "放映", "批注", "缩放",
         )
-        if any(term in compact for term in toolbar_terms):
+        # Ambiguous menu labels that also appear inside ordinary prose
+        # (e.g. "工具" inside "金融工具"). A single weak term only counts as
+        # toolbar noise when the text is short AND sits in the page margin, so
+        # long body sentences are never dropped. But when TWO OR MORE distinct
+        # weak terms co-occur (e.g. an OCR-mangled toolbar strip such as
+        # "文本框形状多排列口轮廓替换"), it is a toolbar regardless of length or
+        # position, because ordinary prose almost never packs several UI labels.
+        weak_terms = (
+            "填充", "查找", "替换", "搜索", "菜单", "工具", "视图", "帮助",
+            "开始", "插入", "设计", "切换", "动画", "审阅",
+            "文件", "编辑", "格式", "共享", "登录", "选择", "打印", "导出",
+            "文本框", "形状", "轮廓", "对齐", "旋转",
+            "艺术字", "绘图", "演示工具",
+        )
+        if any(term in compact for term in strong_terms):
+            return "toolbar"
+        weak_hits = sum(1 for term in weak_terms if term in compact)
+        if weak_hits >= 2:
+            return "toolbar"
+        if in_margin and len(compact) <= 8 and weak_hits >= 1:
             return "toolbar"
         if re.fullmatch(r"[-_—=+*/\\|.·,:;!?()\[\]{}<>]+", compact or ""):
             return "symbol"
@@ -232,13 +254,28 @@ ocr_confidence: {confidence:.2f}
                 continue
             text = block.get("text", "").strip()
             metrics = self._block_metrics(block)
-            kind = self._noise_kind(text)
             in_margin = metrics["max_y"] <= header_limit or metrics["min_y"] >= footer_limit
-            if kind == "toolbar":
-                noise.append(block)
-            elif kind in {"symbol", "empty"}:
-                noise.append(block)
-            elif kind == "page_number" or (in_margin and self._is_margin_noise(text, metrics, page_height)):
+            kind = self._noise_kind(text, in_margin=in_margin)
+            reason = None
+            compact_text = re.sub(r"\s+", "", text)
+            is_page_number = kind == "page_number" or (
+                in_margin and re.fullmatch(r"\d{1,4}", compact_text) is not None
+            )
+            if is_page_number:
+                reason = "page_number"
+            elif kind == "toolbar":
+                reason = "toolbar"
+            elif kind == "symbol":
+                reason = "symbol"
+            elif kind == "empty":
+                reason = "empty"
+            elif in_margin and self._is_margin_noise(text, metrics, page_height):
+                reason = "footer" if metrics["min_y"] >= footer_limit else "header"
+            if reason is not None:
+                # Annotate the block with a human-readable filter reason so the
+                # review block can explain WHY each item was removed.
+                block = dict(block)
+                block["_filter_reason"] = reason
                 noise.append(block)
             else:
                 content.append(block)
@@ -271,21 +308,33 @@ ocr_confidence: {confidence:.2f}
                 return text
         return None
 
+    _FILTER_REASON_LABELS = {
+        "toolbar": "编辑器/导航栏按钮",
+        "symbol": "纯符号噪音",
+        "empty": "空白内容",
+        "page_number": "页号",
+        "header": "页眉",
+        "footer": "页脚/版权信息",
+    }
+
     def _generate_filtered_note(self, noise_blocks: List[Dict[str, Any]]) -> str:
-        """Emit a review note listing filtered-out non-content text."""
+        """Emit a review note listing filtered-out non-content text with reasons."""
         items = []
         for block in noise_blocks:
             text = re.sub(r"\s+", " ", block.get("text", "")).strip()
-            if text:
-                items.append(text)
+            if not text:
+                continue
+            reason = block.get("_filter_reason", "")
+            label = self._FILTER_REASON_LABELS.get(reason, "其他无关内容")
+            items.append((label, text))
         if not items:
             return ""
         lines = [
             "<!-- Filtered non-content (nav bars / headers / footers) - review before archiving -->",
-            "> [!note] 已过滤无关内容（导航栏/页眉/页脚），请人工审核后归档",
+            "> [!note] 已过滤无关内容，请人工审核后归档。每条已标注过滤原因（页号仅供连续归档参考）。",
         ]
-        for text in items:
-            lines.append(f"> - {text}")
+        for label, text in items:
+            lines.append(f"> - [{label}] {text}")
         return "\n".join(lines)
 
     def _block_metrics(self, block: Dict[str, Any]) -> Dict[str, float]:
@@ -705,6 +754,54 @@ ocr_confidence: {confidence:.2f}
     def _row_text(self, row: List[Dict[str, Any]]) -> str:
         """Render one row as text."""
         return " ".join(block.get("text", "").strip() for block in row if block.get("text", "").strip())
+
+    def _drop_body_duplicate_tables(
+        self, tables: List[Dict[str, Any]], content_blocks: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Remove tables whose text mostly repeats already-rendered body content."""
+        if not tables:
+            return tables
+        body_texts = {
+            re.sub(r"\s+", "", block.get("text", ""))
+            for block in content_blocks
+            if block.get("type") == "text" and block.get("text", "").strip()
+        }
+        body_texts.discard("")
+        if not body_texts:
+            return tables
+        kept: List[Dict[str, Any]] = []
+        for table in tables:
+            cell_texts = self._table_cell_texts(table)
+            if len(cell_texts) < 3:
+                kept.append(table)
+                continue
+            matched = sum(1 for cell in cell_texts if cell in body_texts)
+            if matched / len(cell_texts) >= 0.6:
+                # Content already present in body; skip to avoid duplication.
+                continue
+            kept.append(table)
+        return kept
+
+    def _table_cell_texts(self, table: Dict[str, Any]) -> List[str]:
+        """Extract compacted cell strings from a table's cells or HTML."""
+        texts: List[str] = []
+        cells = table.get("cells")
+        if isinstance(cells, list):
+            for cell in cells:
+                if isinstance(cell, dict):
+                    value = cell.get("text", "")
+                else:
+                    value = str(cell)
+                compact = re.sub(r"\s+", "", value or "")
+                if compact:
+                    texts.append(compact)
+        if not texts:
+            html = table.get("html", "") or ""
+            for chunk in re.findall(r"<td[^>]*>(.*?)</td>", html, flags=re.S):
+                compact = re.sub(r"\s+", "", re.sub(r"<[^>]+>", "", chunk))
+                if compact:
+                    texts.append(compact)
+        return texts
 
     def _generate_tables_section(self, tables: List[Dict[str, Any]]) -> str:
         """
