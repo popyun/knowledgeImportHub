@@ -115,6 +115,6 @@ python -c "import io; print(io.open(r'D:\test-temp\ocr_output\99-Audit\OCR-Pendi
 
 ## 8. Git
 
-远端：`https://github.com/popyun/knowledgeImportHub`，分支 `main`，最新已推送提交 `6eddb2a`。
+远端：`https://github.com/popyun/knowledgeImportHub`，分支 `main`，最新已推送提交 `0201c92`（Filter image noise, extract page number, split stacked tables and side notes）。
 
-当前未提交改动：`processors/markdown_generator.py`（区域/表格/噪音过滤/页号/标题的后续修复），`TASK_STATUS.md`。达标后再按需提交推送。
+工作区干净，本地 `main` 与 `origin/main` 一致，无未提交改动。上述区域/表格/噪音过滤/页号/标题的全部修复均已并入 `0201c92`。
