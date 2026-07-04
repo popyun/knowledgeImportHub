@@ -46,36 +46,46 @@ class MarkdownGenerator(BaseHandler):
         blocks = ocr_result.get("blocks", [])
         tables = ocr_result.get("tables", [])
         confidence = ocr_result.get("confidence", 0)
-        
-        # Generate front matter
+
+        # Split page blocks into core content vs filtered noise (nav bars, headers/footers)
+        content_blocks, noise_blocks = self._partition_blocks(blocks)
+        page_number = self._extract_page_number(noise_blocks, blocks)
+        title = self._extract_title(content_blocks, source_path)
+
+        # Generate front matter (page number recorded for sequential archiving)
         front_matter = self._generate_front_matter(
             source_path=source_path,
             confidence=confidence,
-            blocks=blocks,
-            tables=tables
+            tables=tables,
+            title=title,
+            page_number=page_number,
         )
-        
-        # Generate body text
-        title = self._extract_title(blocks, source_path)
-        body_text = self._generate_body_text(blocks, title)
-        
+
+        # Keep the title visible in the body as a heading, then the reconstructed content
+        title_heading = f"# {title}" if title else ""
+        body_text = self._generate_body_text(content_blocks, title)
+
         # Generate tables section
         tables_html = self._generate_tables_section(tables)
-        
+
         # Generate link comments
         link_comments = self._generate_link_comments(link_candidates or [])
-        
+
+        # Note for human review: what was filtered out
+        filtered_note = self._generate_filtered_note(noise_blocks)
+
         # Assemble complete note
-        note_parts = [front_matter, body_text, tables_html, link_comments]
-        
+        note_parts = [front_matter, title_heading, body_text, tables_html, filtered_note, link_comments]
+
         return "\n\n".join(part for part in note_parts if part)
     
     def _generate_front_matter(
         self,
         source_path: str,
         confidence: float,
-        blocks: List[Dict[str, Any]],
-        tables: List[Dict[str, Any]]
+        tables: List[Dict[str, Any]],
+        title: str,
+        page_number: Optional[str] = None,
     ) -> str:
         """
         Generate YAML front matter.
@@ -83,15 +93,13 @@ class MarkdownGenerator(BaseHandler):
         Args:
             source_path: Source image path
             confidence: OCR confidence score
-            blocks: OCR blocks
             tables: Generated table dictionaries
-            
+            title: Extracted document title
+            page_number: Page number parsed from header/footer, if any
+
         Returns:
             YAML front matter string
         """
-        # Generate title from first block or filename
-        title = self._extract_title(blocks, source_path)
-        
         # Get current date
         date_str = datetime.now().strftime("%Y-%m-%d")
         
@@ -102,10 +110,11 @@ class MarkdownGenerator(BaseHandler):
         tags = ["ocr/pending"]
         if tables:
             tags.append("ocr/table")
-        
+
+        page_line = f"\npage: {page_number}" if page_number else ""
         front_matter = f"""---
 title: "{title}"
-date: {date_str}
+date: {date_str}{page_line}
 tags: [{', '.join(f'"{tag}"' for tag in tags)}]
 status: pending
 source: "[[00-RAW/{source_name}]]"
@@ -129,8 +138,10 @@ ocr_confidence: {confidence:.2f}
         page_top = min(self._block_metrics(block)["min_y"] for block in text_blocks)
         page_bottom = max(self._block_metrics(block)["max_y"] for block in text_blocks)
         page_height = max(page_bottom - page_top, 1)
-        content_top = page_top + page_height * 0.08
-        content_bottom = page_top + page_height * 0.45
+        # Title lives in the upper portion of the (already denoised) content.
+        content_bottom = page_top + page_height * 0.5
+        median_height = sorted(self._block_metrics(block)["height"] for block in text_blocks)
+        median_height = median_height[len(median_height) // 2]
 
         candidates = []
         for row in rows:
@@ -139,16 +150,19 @@ ocr_confidence: {confidence:.2f}
                 continue
             row_metrics = [self._block_metrics(block) for block in row]
             row_y = min(metric["min_y"] for metric in row_metrics)
-            if row_y < content_top or row_y > content_bottom:
+            if row_y > content_bottom:
                 continue
             row_height = max(metric["height"] for metric in row_metrics)
             row_width = max(metric["max_x"] for metric in row_metrics) - min(metric["min_x"] for metric in row_metrics)
             row_center_y = sum(metric["center_y"] for metric in row_metrics) / len(row_metrics)
             relative_y = (row_center_y - page_top) / page_height
-            score = row_height * 4 + max(0, 45 - relative_y * 100)
-            score += min(row_width / max(page_height, 1), 1.0) * 35
-            if 8 <= len(row_text) <= 120:
-                score += 20
+            # Prefer larger-than-body font near the top; ignore tiny/very long lines.
+            score = (row_height / max(median_height, 1)) * 60
+            score += max(0, 40 - relative_y * 80)
+            if 6 <= len(row_text) <= 60:
+                score += 15
+            if row_height < median_height * 1.1:
+                score -= 40
             candidates.append((score, row_y, row_text))
 
         if candidates:
@@ -160,19 +174,110 @@ ocr_confidence: {confidence:.2f}
 
     def _is_toolbar_noise(self, text: str) -> bool:
         """Return True for UI toolbar or footer OCR noise."""
+        return self._noise_kind(text) is not None
+
+    def _noise_kind(self, text: str) -> Optional[str]:
+        """Classify OCR text as a kind of noise, or None when it is content."""
         compact = re.sub(r"\s+", "", text)
+        if not compact:
+            return "empty"
         toolbar_terms = (
             "填充", "查找", "替换", "搜索", "菜单", "工具", "视图", "帮助",
             "开始", "插入", "设计", "切换", "动画", "放映", "审阅",
             "文件", "编辑", "格式", "缩放", "批注", "共享", "登录",
+            "智能图形", "选择", "另存为", "打印", "导出", "幻灯片",
         )
         if any(term in compact for term in toolbar_terms):
-            return True
+            return "toolbar"
         if re.fullmatch(r"[-_—=+*/\\|.·,:;!?()\[\]{}<>]+", compact or ""):
-            return True
+            return "symbol"
         if re.fullmatch(r"第?\d+页|\d+/\d+", compact or ""):
+            return "page_number"
+        return None
+
+    def _partition_blocks(
+        self, blocks: List[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Split OCR blocks into core content and filtered noise.
+
+        Noise = editor/navigation toolbars plus PPT-style headers and footers
+        located in the top/bottom page margins. Everything else is core content.
+        """
+        text_blocks = [
+            block for block in blocks
+            if block.get("type") == "text" and block.get("text", "").strip()
+        ]
+        if not text_blocks:
+            return [], []
+        page_top = min(self._block_metrics(block)["min_y"] for block in text_blocks)
+        page_bottom = max(self._block_metrics(block)["max_y"] for block in text_blocks)
+        page_height = max(page_bottom - page_top, 1)
+        header_limit = page_top + page_height * 0.07
+        footer_limit = page_bottom - page_height * 0.07
+
+        content: List[Dict[str, Any]] = []
+        noise: List[Dict[str, Any]] = []
+        for block in blocks:
+            if block.get("type") != "text" or not block.get("text", "").strip():
+                content.append(block)
+                continue
+            text = block.get("text", "").strip()
+            metrics = self._block_metrics(block)
+            kind = self._noise_kind(text)
+            in_margin = metrics["max_y"] <= header_limit or metrics["min_y"] >= footer_limit
+            if kind == "toolbar":
+                noise.append(block)
+            elif kind in {"symbol", "empty"}:
+                noise.append(block)
+            elif kind == "page_number" or (in_margin and self._is_margin_noise(text, metrics, page_height)):
+                noise.append(block)
+            else:
+                content.append(block)
+        return content, noise
+
+    def _is_margin_noise(self, text: str, metrics: Dict[str, float], page_height: float) -> bool:
+        """Header/footer heuristic: short or boilerplate text in page margins."""
+        compact = re.sub(r"\s+", "", text)
+        if len(compact) <= 6:
+            return True
+        footer_terms = ("版权", "保留", "所有权利", "confidential", "版权所有", "有限公司", "咨询")
+        lowered = compact.lower()
+        if any(term.lower() in lowered for term in footer_terms):
             return True
         return False
+
+    def _extract_page_number(
+        self, noise_blocks: List[Dict[str, Any]], all_blocks: List[Dict[str, Any]]
+    ) -> Optional[str]:
+        """Pull a page number from footer/header noise for sequential archiving."""
+        for block in noise_blocks:
+            text = re.sub(r"\s+", "", block.get("text", ""))
+            match = re.search(r"(\d+)\s*/\s*(\d+)", text)
+            if match:
+                return f"{match.group(1)}/{match.group(2)}"
+            match = re.fullmatch(r"第?(\d+)页", text)
+            if match:
+                return match.group(1)
+            if re.fullmatch(r"\d{1,4}", text):
+                return text
+        return None
+
+    def _generate_filtered_note(self, noise_blocks: List[Dict[str, Any]]) -> str:
+        """Emit a review note listing filtered-out non-content text."""
+        items = []
+        for block in noise_blocks:
+            text = re.sub(r"\s+", " ", block.get("text", "")).strip()
+            if text:
+                items.append(text)
+        if not items:
+            return ""
+        lines = [
+            "<!-- Filtered non-content (nav bars / headers / footers) - review before archiving -->",
+            "> [!note] 已过滤无关内容（导航栏/页眉/页脚），请人工审核后归档",
+        ]
+        for text in items:
+            lines.append(f"> - {text}")
+        return "\n".join(lines)
 
     def _block_metrics(self, block: Dict[str, Any]) -> Dict[str, float]:
         """Return bbox metrics for reading-order reconstruction."""
@@ -214,9 +319,7 @@ ocr_confidence: {confidence:.2f}
         """Generate body text by visual regions before handling columns."""
         text_blocks = [
             block for block in blocks
-            if block.get("type") == "text"
-            and block.get("text", "").strip()
-            and not self._is_toolbar_noise(block.get("text", ""))
+            if block.get("type") == "text" and block.get("text", "").strip()
         ]
         if not text_blocks:
             return ""
@@ -370,7 +473,7 @@ ocr_confidence: {confidence:.2f}
         return aligned_rows >= 2 and aligned_rows / len(rows) >= 0.6
 
     def _estimate_columns(self, rows: List[List[Dict[str, Any]]]) -> List[float]:
-        """Cluster block center-x positions into column anchors."""
+        """Cluster block center-x positions into column anchors (centroids)."""
         centers = sorted(
             self._block_metrics(block)["center_x"]
             for row in rows for block in row
@@ -379,10 +482,24 @@ ocr_confidence: {confidence:.2f}
             return []
         heights = [self._block_metrics(block)["height"] for row in rows for block in row]
         gap_threshold = max(sorted(heights)[len(heights) // 2] * 1.5, 20)
-        columns = [centers[0]]
+        # Group adjacent centers into clusters, then use each cluster centroid
+        # so a single misaligned block cannot spawn a spurious column anchor.
+        clusters: List[List[float]] = [[centers[0]]]
         for center in centers[1:]:
-            if center - columns[-1] > gap_threshold:
-                columns.append(center)
+            if center - clusters[-1][-1] > gap_threshold:
+                clusters.append([center])
+            else:
+                clusters[-1].append(center)
+        row_count = max(len(rows), 1)
+        columns: List[float] = []
+        for cluster in clusters:
+            # Drop weak clusters that only a small fraction of rows populate;
+            # these are usually stray blocks, not real table columns.
+            if len(cluster) < 2 and row_count >= 3:
+                continue
+            columns.append(sum(cluster) / len(cluster))
+        if not columns:
+            columns = [sum(cluster) / len(cluster) for cluster in clusters]
         return columns
 
     def _columns_covered(self, row: List[Dict[str, Any]], columns: List[float]) -> int:
@@ -412,9 +529,11 @@ ocr_confidence: {confidence:.2f}
 
     def _render_markdown_table(self, rows: List[List[Dict[str, Any]]]) -> str:
         """Render OCR rows as a Markdown table."""
+        rows, side_notes = self._separate_side_notes(rows)
         columns = self._estimate_columns(rows)
         if len(columns) < 2:
-            return self._render_rows(rows)
+            body = self._render_rows(rows)
+            return "\n\n".join(part for part in [body, side_notes] if part)
         normalized_rows = []
         for row in rows:
             cells = [""] * len(columns)
@@ -428,7 +547,8 @@ ocr_confidence: {confidence:.2f}
             if any(cells):
                 normalized_rows.append(cells)
         if len(normalized_rows) < 2:
-            return self._render_rows(rows)
+            body = self._render_rows(rows)
+            return "\n\n".join(part for part in [body, side_notes] if part)
         col_count = len(columns)
         padded = [row + [""] * (col_count - len(row)) for row in normalized_rows]
         lines = [
@@ -437,7 +557,59 @@ ocr_confidence: {confidence:.2f}
         ]
         for row in padded[1:]:
             lines.append("| " + " | ".join(row) + " |")
-        return "\n".join(lines)
+        table_md = "\n".join(lines)
+        return "\n\n".join(part for part in [table_md, side_notes] if part)
+
+    def _separate_side_notes(
+        self, rows: List[List[Dict[str, Any]]]
+    ) -> Tuple[List[List[Dict[str, Any]]], str]:
+        """Split off wide paragraph blocks that sit beside a grid.
+
+        A side note is an OCR block whose width is much larger than the table's
+        typical cell width and which sits to the right of the main grid body.
+        These are explanatory captions, not table cells.
+        """
+        widths = [
+            self._block_metrics(block)["width"]
+            for row in rows for block in row
+        ]
+        if len(widths) < 4:
+            return rows, ""
+        sorted_widths = sorted(widths)
+        median_width = sorted_widths[len(sorted_widths) // 2]
+
+        # Right edge of the grid body, measured only from cell-sized blocks so a
+        # wide caption cannot inflate it.
+        cell_right_edges = sorted(
+            self._block_metrics(block)["max_x"]
+            for row in rows for block in row
+            if self._block_metrics(block)["width"] <= median_width * 1.6
+        )
+        if not cell_right_edges:
+            return rows, ""
+        grid_right = cell_right_edges[int(len(cell_right_edges) * 0.9)]
+
+        kept_rows: List[List[Dict[str, Any]]] = []
+        note_blocks: List[Dict[str, Any]] = []
+        for row in rows:
+            kept = []
+            for block in row:
+                metrics = self._block_metrics(block)
+                # A caption starts to the right of the grid body and is wider
+                # than a normal cell; both conditions guard against false hits.
+                starts_right_of_grid = metrics["min_x"] >= grid_right + median_width * 0.3
+                is_wide = metrics["width"] >= median_width * 2.0
+                if starts_right_of_grid and is_wide:
+                    note_blocks.append(block)
+                else:
+                    kept.append(block)
+            if kept:
+                kept_rows.append(kept)
+        if not note_blocks:
+            return rows, ""
+        note_rows = self._group_blocks_into_rows(note_blocks)
+        side_text = self._render_rows(note_rows)
+        return kept_rows, side_text
 
     def _escape_table_cell(self, text: str) -> str:
         """Escape Markdown table separators inside a cell."""
@@ -490,6 +662,9 @@ ocr_confidence: {confidence:.2f}
         """Render rows as text, converting only contiguous grid runs to tables."""
         if not rows:
             return ""
+        heights = [self._block_metrics(block)["height"] for row in rows for block in row]
+        median_height = sorted(heights)[len(heights) // 2] if heights else 12
+        table_gap = max(median_height * 0.7, 10)
         chunks: List[str] = []
         buffer: List[List[Dict[str, Any]]] = []
 
@@ -502,12 +677,19 @@ ocr_confidence: {confidence:.2f}
                 chunks.append(self._render_rows(buffer))
             buffer.clear()
 
+        previous_bottom: Optional[float] = None
         for row in rows:
+            row_top = min(self._block_metrics(block)["min_y"] for block in row)
+            row_bottom = max(self._block_metrics(block)["max_y"] for block in row)
             if len(row) >= 2:
+                # A wide vertical gap marks the boundary between stacked tables.
+                if buffer and previous_bottom is not None and row_top - previous_bottom > table_gap:
+                    flush_buffer()
                 buffer.append(row)
             else:
                 flush_buffer()
                 chunks.append(self._render_rows([row]))
+            previous_bottom = row_bottom
         flush_buffer()
         return "\n\n".join(chunk for chunk in chunks if chunk)
 
