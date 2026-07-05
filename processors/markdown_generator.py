@@ -131,6 +131,29 @@ ocr_confidence: {confidence:.2f}
         
         return front_matter
     
+    def _clean_title(self, title: str) -> str:
+        """Normalize OCR artefacts in an extracted/summarized title.
+
+        Fixes recurring OCR noise seen in slide titles:
+          - duplicated single CJK char across a space (``计量 量一...`` -> ``计量 一...``),
+          - dash fragments (``一—一`` / ``一一`` / ``——``) collapsed to a single ``一``,
+          - stray spaces around full-width brackets and collapsed runs of spaces.
+        Conservative by design so genuine titles are left intact.
+        """
+        if not title:
+            return title
+        t = title
+        # 1) OCR duplicated char across a separating space: X<space>X -> X<space>
+        t = re.sub(r"([\u4e00-\u9fff])(\s+)\1(?=[\u4e00-\u9fff—\-一])", r"\1\2", t)
+        # 2) Collapse dash fragments (full/half-width) into a single 一.
+        t = re.sub(r"[一—\-]{2,}", "一", t)
+        # 3) Remove stray spaces hugging full-width brackets.
+        t = re.sub(r"\s+([（）【】《》])", r"\1", t)
+        t = re.sub(r"([（【《])\s+", r"\1", t)
+        # 4) Collapse remaining multi-spaces.
+        t = re.sub(r"\s{2,}", " ", t).strip()
+        return t
+
     def _extract_title(
         self,
         blocks: List[Dict[str, Any]],
@@ -200,7 +223,8 @@ ocr_confidence: {confidence:.2f}
             # regardless of a slightly taller OCR line box. Length is a hard gate.
             within_len = best_len <= 40
             if best_score > 30 and within_len:
-                return best_text.replace('"', "'")[:120], {"source": "heading"}
+                cleaned = self._clean_title(best_text.replace('"', "'"))
+                return cleaned[:120], {"source": "heading"}
 
         # No clear heading: summarize the leading body content into a short title.
         summary, summary_mode = self._summarize_blocks(text_blocks)
@@ -245,6 +269,8 @@ ocr_confidence: {confidence:.2f}
         sentence = re.split(r"[。！？；;.!?]", cleaned, maxsplit=1)[0].strip()
         if not sentence:
             sentence = cleaned
+        # Normalize OCR artefacts (dup chars, dash fragments, bracket spacing).
+        sentence = self._clean_title(sentence)
 
         limit = self._SUMMARY_TITLE_MAX
         if len(sentence) <= limit:

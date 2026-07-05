@@ -251,6 +251,31 @@ class TestTitleExtraction:
         note = gen._generate_review_note(title, {"source": "summary", "summary_mode": mode})
         assert "[!todo]" in note and title in note
 
+    def test_title_cleanup_dedup_and_dash(self):
+        gen = self._gen()
+        # "计量 量一一计算步骤" -> dup "量" removed, "一一" -> "一"
+        s = "\u8fdd\u7ea6\u98ce\u9669\u8d44\u672c\u8ba1\u91cf \u91cf\u4e00\u4e00\u8ba1\u7b97\u6b65\u9aa4"
+        out = gen._clean_title(s)
+        assert out == "\u8fdd\u7ea6\u98ce\u9669\u8d44\u672c\u8ba1\u91cf \u4e00\u8ba1\u7b97\u6b65\u9aa4"
+
+    def test_title_cleanup_dash_fragment_with_emdash(self):
+        gen = self._gen()
+        # "量一—一计算步骤（续）" fragment -> "一计算步骤（续）"
+        s = "\u8fdd\u7ea6\u98ce\u9669\u8d44\u672c\u8ba1\u91cf \u91cf\u4e00\u2014\u4e00\u8ba1\u7b97\u6b65\u9aa4\uff08\u7eed\uff09"
+        out = gen._clean_title(s)
+        assert out == "\u8fdd\u7ea6\u98ce\u9669\u8d44\u672c\u8ba1\u91cf \u4e00\u8ba1\u7b97\u6b65\u9aa4\uff08\u7eed\uff09"
+
+    def test_title_cleanup_bracket_spacing(self):
+        gen = self._gen()
+        s = "GIRR Delta\u8ba1\u7b97\u793a\u4f8b \uff08\u516d\uff09"
+        out = gen._clean_title(s)
+        assert out == "GIRR Delta\u8ba1\u7b97\u793a\u4f8b\uff08\u516d\uff09"
+
+    def test_title_cleanup_leaves_normal_title(self):
+        gen = self._gen()
+        s = "\u503a\u5238\u7c7b\u4ea7\u54c1FRTB\u8d44\u672c\u8ba1\u91cf \u8fdd\u7ea6\u98ce\u9669\u8d44\u672c\u8ba1\u7b97\u793a\u4f8b\uff08\u4e00\uff09"
+        assert gen._clean_title(s) == s
+
 class TestLinkHelpers:
     """Test link helper functions."""
     

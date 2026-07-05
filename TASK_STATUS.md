@@ -282,6 +282,17 @@ python -c "import io; print(io.open(r'D:\test-temp\ocr_output\99-Audit\OCR-Pendi
   - `_partition_blocks` 的 page_number 标记改用该候选集的 id 集合，删除旧“in_margin 裸数字一律当页号”逻辑。
 
 - 全量缓存回归（33 样例，改前 vs 改后严格 diff）：仅 2 张变化且均为正向修复——`121150` page `1`→`None`、footer 过滤 10→0（矩阵数据回归、tblsep 31→32）；`121139` page `9`→`32`（此前误取左侧序号列末位 9，现正确取右下角 relx=0.98 的 32）。其余 31 张页号/过滤/表格指标零变化。`pytest tests/ -q` = 22 passed。
+## 7.12 本轮修复（2026-07-05 迭代十三）：P2 标题清洗（叠字/破折号/括号空格）
+
+修复 7.7 记录的 P2（标题 OCR 叠字、破折号碎片、全角括号多余空格）。改动在 `processors/markdown_generator.py` 与 `tests/test_pipeline.py`。
+
+- 新增 `_clean_title`，在 `_extract_title` 的 heading 返回处、以及 `_summarize_blocks` 生成首句后统一调用。规则（保守，避免误伤正常标题）：
+  1. OCR 叠字：`X<空格>X` -> `X<空格>`（删除空格后重复的单字），修复 `计量 量一...` -> `计量 一...`；
+  2. 破折号碎片：连续的 `一`/`—`/`-`（`[一—\-]{2,}`）归一为单个 `一`，修复 `一—一`/`一一` -> `一`；
+  3. 全角括号 `（）【】《》` 前后多余空格压缩；
+  4. 多空格归一。
+
+- 全量缓存回归（33 样例标题，改前 vs 改后严格 diff）：仅 3 张变化且均为目标修复——`121128` `示例 （六）` -> `示例（六）`；`121220` `计量 量一—一计算步骤（续）` -> `计量 一计算步骤（续）`；`121224` `计量 量一一计算步骤` -> `计量 一计算步骤`。其余 30 张标题零变化。`pytest tests/ -q` = 26 passed（新增 4 项标题清洗测试）。
 ## 8. Git
 
 远端：`https://github.com/popyun/knowledgeImportHub`，分支 `main`，最新已推送提交 `0201c92`（Filter image noise, extract page number, split stacked tables and side notes）。
