@@ -1,6 +1,14 @@
 """
 Test runner for Obsidian Knowledge Import Hub.
 Processes images from D:\test-temp\png and outputs to D:\test-temp\ocr_output
+
+NOTE: This script only validates setup / lists what would be processed. For
+real OCR test runs with result archiving and iteration-to-iteration comparison,
+use `test_snapshot.py` instead:
+
+    python test_snapshot.py run --use-cache   # run + archive + auto-compare
+    python test_snapshot.py compare           # diff the two latest snapshots
+    python test_snapshot.py list              # list archived snapshots
 """
 
 import os

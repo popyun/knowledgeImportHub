@@ -188,6 +188,27 @@ python -c "import io; print(io.open(r'D:\test-temp\ocr_output\99-Audit\OCR-Pendi
 
 仍待修（后续）：7.4 的 P2（工具栏 OCR 错字漏过滤）、P3（标题多余空格/前导符号），及并排矩阵/大矩阵结构化（OCR 精度极限，需 PP-Structure 或人工复核标注）。
 
+## 7.6 测试结果存档功能（2026-07-05 迭代七新增）
+
+新增迭代测试归档工具 `test_snapshot.py`（项目根目录），用于每次测试结果留存与迭代间对比。
+
+用途与命令（PowerShell）：
+- `python test_snapshot.py run`：对样本图跑完整 OCR→Markdown 链路，把每张渲染结果与指标存入带时间戳的快照目录，并自动与上一份快照对比。
+- `python test_snapshot.py run --use-cache`：命中缓存时跳过慢速 OCR（单图约 60-100s），仅重算版面，便于纯布局迭代。
+- `python test_snapshot.py run --images <a.jpg> <b.jpg>`：只跑指定图。
+- `python test_snapshot.py compare [--old <name> --new <name>]`：对比两份快照（默认最近两份），不跑 OCR。
+- `python test_snapshot.py list`：列出已存档快照。
+
+存档结构（默认根 `D:/test-temp/ocr_output/_snapshots`，位于仓库外，不进 git）：
+- `<时间戳>/<image>.md`：每张图的渲染 Markdown 快照。
+- `<时间戳>/manifest.json`：本次快照的每图指标（chars/lines/table_rows/external_tables/ocr_blocks/confidence）。
+- `_cache/<image>.json`：per-image OCR 块缓存（`corrected_result`），供 `--use-cache` 复用。
+- `latest.txt`：最近一次快照时间戳。
+
+对比逻辑：逐图比较 Markdown，忽略 front matter `date:` 行（避免跨天误报）；输出 unchanged/changed/added/removed 统计，对 changed 项打印指标前后值与 unified diff。这正是本项目多轮迭代所需的“改动前后逐图对照”能力，替代此前手工缓存+diff 的临时脚本流程。
+
+验证：已建立 baseline 快照（121205/121217/121121，均成功）；二次 `--use-cache` 运行 1.5s 内完成并正确报告全部 unchanged；构造变体快照验证 changed 分支能准确定位差异行与指标变化。
+
 ## 8. Git
 
 远端：`https://github.com/popyun/knowledgeImportHub`，分支 `main`，最新已推送提交 `0201c92`（Filter image noise, extract page number, split stacked tables and side notes）。
