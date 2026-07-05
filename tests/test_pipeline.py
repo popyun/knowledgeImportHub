@@ -276,6 +276,30 @@ class TestTitleExtraction:
         s = "\u503a\u5238\u7c7b\u4ea7\u54c1FRTB\u8d44\u672c\u8ba1\u91cf \u8fdd\u7ea6\u98ce\u9669\u8d44\u672c\u8ba1\u7b97\u793a\u4f8b\uff08\u4e00\uff09"
         assert gen._clean_title(s) == s
 
+    def test_noise_mangled_toolbar_run_in_margin(self):
+        gen = self._gen()
+        # OCR-mangled toolbar strip with a repeated-char run, in the margin.
+        assert gen._noise_kind("\u4e09\u4e09\u4e09\u4e09\u680f\u680f\u4e09\u55b5\u8f6c\u667a\u80fd\u518c\u5f62", in_margin=True) == "toolbar"
+        assert gen._noise_kind("IAAAE\u00b7\u6c47\u533a", in_margin=True) == "toolbar"
+
+    def test_noise_repeated_run_outside_margin_is_content(self):
+        gen = self._gen()
+        # Same repeated-char pattern OUTSIDE the margin (e.g. table sample cell)
+        # must remain content.
+        assert gen._noise_kind("AAA", in_margin=False) is None
+        assert gen._noise_kind("BBB", in_margin=False) is None
+
+    def test_noise_numeric_run_in_margin_not_toolbar(self):
+        gen = self._gen()
+        # Numeric/percent tokens in the margin are table residue, not toolbar.
+        assert gen._noise_kind("111", in_margin=True) != "toolbar"
+        assert gen._noise_kind("100.0%", in_margin=True) != "toolbar"
+
+    def test_noise_mangled_presentation_tool_label(self):
+        gen = self._gen()
+        # "\u6f14\u793a\u4e0a\u5177" (OCR typo of "\u6f14\u793a\u5de5\u5177") short + margin -> toolbar.
+        assert gen._noise_kind("\u6f14\u793a\u4e0a\u5177\u00b7", in_margin=True) == "toolbar"
+
 class TestLinkHelpers:
     """Test link helper functions."""
     

@@ -369,7 +369,7 @@ ocr_confidence: {confidence:.2f}
             "开始", "插入", "设计", "切换", "动画", "审阅",
             "文件", "编辑", "格式", "共享", "登录", "选择", "打印", "导出",
             "文本框", "形状", "轮廓", "对齐", "旋转",
-            "艺术字", "绘图", "演示工具",
+            "艺术字", "绘图", "演示工具", "演示",
         )
         if any(term in compact for term in strong_terms):
             return "toolbar"
@@ -378,6 +378,15 @@ ocr_confidence: {confidence:.2f}
             return "toolbar"
         if in_margin and len(compact) <= 8 and weak_hits >= 1:
             return "toolbar"
+        # OCR-mangled toolbar strips in the page margin: the icon/label ribbon
+        # often OCRs into a garbled run with a long repeated-character streak
+        # (e.g. "三三三三栏栏转智能形", "IAAAE汇区"). A run of >=3 identical
+        # CJK/letter chars in a MARGIN block that is not purely numeric is a
+        # reliable toolbar signal; body/table cells with repeats (e.g. sample
+        # values "AAA"/"BBB") live outside the margins, so they are unaffected.
+        if in_margin and not re.fullmatch(r"[\d.,%+\-/~():：·¥$€]+", compact):
+            if re.search(r"([\u4e00-\u9fffA-Za-z])\1{2,}", compact):
+                return "toolbar"
         if re.fullmatch(r"[-_—=+*/\\|.·,:;!?()\[\]{}<>]+", compact or ""):
             return "symbol"
         if re.fullmatch(r"第?\d+页|\d+/\d+", compact or ""):
