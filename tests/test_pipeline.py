@@ -178,6 +178,47 @@ class TestTableBuilder:
         assert [[cell["text"] for cell in row] for row in rows] == [["A1", "B1"], ["A2", "B2"]]
 
 
+class TestTitleExtraction:
+    """Title extraction: real heading vs summary fallback."""
+
+    def _gen(self):
+        from processors.markdown_generator import MarkdownGenerator
+        return MarkdownGenerator({})
+
+    def _row(self, text, y0, y1, x1=200):
+        return {"type": "text", "text": text, "confidence": 0.98,
+                "bbox": [[0, y0], [x1, y0], [x1, y1], [0, y1]]}
+
+    def test_real_heading_is_kept(self):
+        gen = self._gen()
+        blocks = [
+            self._row("\u654f\u611f\u5ea6\u8d44\u672c\u8ba1\u91cf \u8ba1\u91cf\u8303\u56f4", 10, 60, x1=300),
+            self._row("\u5177\u6709\u8fdc\u671f\u6027\u8d28\u7684\u4ea7\u54c1\u90fd\u8981\u8ba1\u91cf\u4e00\u822c\u5229\u7387\u98ce\u9669\u5e76\u4e14\u8fd8\u8981\u8003\u8651\u5176\u4ed6", 90, 120),
+        ]
+        title, meta = gen._extract_title(blocks, "x.jpg")
+        assert meta["source"] == "heading"
+        assert title.startswith("\u654f\u611f\u5ea6\u8d44\u672c\u8ba1\u91cf")
+
+    def test_long_body_only_falls_back_to_summary(self):
+        gen = self._gen()
+        long_line = "\u8fdd\u7ea6\u98ce\u9669\u8d44\u672c\u8ba1\u91cf\u8861\u91cf\u4e86\u5728\u7a81\u53d1\u6781\u7aef\u60c5\u51b5\u4e0b\uff0c\u4f01\u4e1a\u7ecf\u8425\u60c5\u51b5\u6076\u5316\uff0c\u9020\u6210\u4f01\u4e1a\u6240\u53d1\u884c\u7684\u80a1\u7968\u3001\u503a\u5238\u4ef7\u683c\u5728\u77ed\u65f6\u95f4\u5185\u5267\u70c8\u6ce2\u52a8\u7684"
+        blocks = [
+            self._row(long_line, 10, 90, x1=3300),
+            self._row("\u98ce\u9669\u3002\u76d1\u7ba1\u89c4\u5b9a\u7684\u8ba1\u91cf\u671f\u9650\u4e3a1\u5e74", 100, 160),
+        ]
+        title, meta = gen._extract_title(blocks, "x.jpg")
+        assert meta["source"] == "summary"
+        assert len(title) <= gen._SUMMARY_TITLE_MAX
+        assert long_line != title
+        note = gen._generate_review_note(title, meta)
+        assert "[!todo]" in note
+        assert title in note
+
+    def test_heading_meta_has_no_review_note(self):
+        gen = self._gen()
+        note = gen._generate_review_note("A Title", {"source": "heading"})
+        assert note == ""
+
 class TestLinkHelpers:
     """Test link helper functions."""
     

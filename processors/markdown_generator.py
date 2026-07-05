@@ -50,7 +50,7 @@ class MarkdownGenerator(BaseHandler):
         # Split page blocks into core content vs filtered noise (nav bars, headers/footers)
         content_blocks, noise_blocks = self._partition_blocks(blocks)
         page_number = self._extract_page_number(noise_blocks, blocks)
-        title = self._extract_title(content_blocks, source_path)
+        title, title_meta = self._extract_title(content_blocks, source_path)
 
         # Generate front matter (page number recorded for sequential archiving)
         front_matter = self._generate_front_matter(
@@ -79,8 +79,11 @@ class MarkdownGenerator(BaseHandler):
         # Note for human review: what was filtered out
         filtered_note = self._generate_filtered_note(noise_blocks)
 
+        # Items needing human confirmation (e.g. a summary-based title).
+        review_note = self._generate_review_note(title, title_meta)
+
         # Assemble complete note
-        note_parts = [front_matter, title_heading, body_text, tables_html, filtered_note, link_comments]
+        note_parts = [front_matter, title_heading, body_text, tables_html, review_note, filtered_note, link_comments]
 
         return "\n\n".join(part for part in note_parts if part)
     
@@ -132,12 +135,18 @@ ocr_confidence: {confidence:.2f}
         self,
         blocks: List[Dict[str, Any]],
         source_path: str
-    ) -> str:
-        """Extract a document title from page content, not app toolbar text."""
+    ) -> Tuple[str, Dict[str, Any]]:
+        """Extract a document title from page content, not app toolbar text.
+
+        Returns a ``(title, meta)`` tuple. ``meta['source']`` is one of
+        ``"heading"`` (a genuine large-font heading was found), ``"summary"``
+        (no heading; title was synthesized by summarizing the body and must be
+        human-confirmed) or ``"filename"`` (no usable text at all).
+        """
         text_blocks = [block for block in blocks if block.get("type") == "text" and block.get("text", "").strip()]
         if not text_blocks:
             filename = source_path.split("/")[-1].split("\\")[-1]
-            return filename.rsplit(".", 1)[0]
+            return filename.rsplit(".", 1)[0], {"source": "filename"}
 
         rows = self._group_blocks_into_rows(text_blocks)
         page_top = min(self._block_metrics(block)["min_y"] for block in text_blocks)
@@ -177,15 +186,77 @@ ocr_confidence: {confidence:.2f}
                 score -= 25 * (len(row) - 3)
             if len(row_text) > 45:
                 score -= (len(row_text) - 45) * 1.5
-            candidates.append((score, row_y, row_text))
+            candidates.append((score, row_y, row_text, row_height, len(row_text)))
 
         if candidates:
-            _score, _row_y, title = max(candidates, key=lambda item: (item[0], -item[1]))
-            return title.replace('"', "'")[:120]
+            best = max(candidates, key=lambda item: (item[0], -item[1]))
+            best_score, _row_y, best_text, best_height, best_len = best
+            # A genuine heading is meaningfully larger than body text OR short,
+            # and scores positively. When the best candidate is just a long body
+            # line (no larger font, over the length window), reject it and fall
+            # back to a summarized title so we never dump a whole paragraph into
+            # the title field.
+            # A real heading is short; a whole body sentence is not a title
+            # regardless of a slightly taller OCR line box. Length is a hard gate.
+            within_len = best_len <= 40
+            if best_score > 30 and within_len:
+                return best_text.replace('"', "'")[:120], {"source": "heading"}
+
+        # No clear heading: summarize the leading body content into a short title.
+        summary = self._summarize_blocks(text_blocks)
+        if summary:
+            return summary, {"source": "summary"}
 
         filename = source_path.split("/")[-1].split("\\")[-1]
-        return filename.rsplit(".", 1)[0]
+        return filename.rsplit(".", 1)[0], {"source": "filename"}
 
+    # Max characters kept for an auto-summarized (fallback) title.
+    _SUMMARY_TITLE_MAX = 30
+
+    def _summarize_blocks(self, text_blocks: List[Dict[str, Any]]) -> str:
+        """Build a short title by summarizing the leading body text.
+
+        Used only when the page has no clear large-font heading. Takes the
+        first content block in reading order, strips leading markers/quotes,
+        cuts at the first sentence boundary and hard-caps the length so a whole
+        paragraph never becomes the title.
+        """
+        ordered = sorted(text_blocks, key=lambda b: (self._block_metrics(b)["min_y"], self._block_metrics(b)["min_x"]))
+        first_text = ""
+        for block in ordered:
+            candidate = block.get("text", "").strip()
+            if candidate and not self._is_toolbar_noise(candidate):
+                first_text = candidate
+                break
+        if not first_text:
+            return ""
+        # Drop leading blockquote/list markers and quote glyphs.
+        cleaned = first_text.lstrip(">>#*-–—•· \t\u3000").strip()
+        cleaned = cleaned.replace('"', "'")
+        # Cut at the first sentence-ending punctuation to keep a coherent phrase.
+        cut = re.split(r"[。！？；;.!?]", cleaned, maxsplit=1)[0].strip()
+        if not cut:
+            cut = cleaned
+        limit = self._SUMMARY_TITLE_MAX
+        if len(cut) > limit:
+            # Prefer to break on a natural separator within the limit.
+            window = cut[:limit]
+            break_pos = max(window.rfind(sep) for sep in ("，", "、", "：", ",", " "))
+            if break_pos >= limit // 2:
+                cut = window[:break_pos]
+            else:
+                cut = window
+        return cut.strip()
+
+    def _generate_review_note(self, title: str, title_meta: Dict[str, Any]) -> str:
+        """Emit a human-confirmation note for auto-synthesized content."""
+        if not title_meta or title_meta.get("source") != "summary":
+            return ""
+        return (
+            "> [!todo] 待确认事项（需人工核对）\n"
+            "> - 本页未检测到明显的加大/加粗标题；标题 `" + title + "` "
+            "系由正文首段自动摘要生成（已限长）。原图多为纯文本稀疏页，请人工确认标题是否准确或改写。"
+        )
     def _is_toolbar_noise(self, text: str) -> bool:
         """Return True for UI toolbar or footer OCR noise."""
         return self._noise_kind(text) is not None

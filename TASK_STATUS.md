@@ -240,6 +240,22 @@ python -c "import io; print(io.open(r'D:\test-temp\ocr_output\99-Audit\OCR-Pendi
 - 【无缺陷｜预处理鲁棒性确认】`121121` 的 resized/sharpened/prep 三个变体均产出 `table_rows=13`、置信度 0.94-0.96，与基线一致，说明缩放/锐化/预处理链路对参考样例无回归、结果稳定。
 
 判断：本轮维持“记录不修”。真正值得下一轮修的是标题层的两个问题（`121236` 整段入题 P1、`121220`/`121224` 叠字破折号 P2），二者都集中在 `_extract_title` 的候选筛选与清洗，改动面小、回归风险可用快照 `2026-07-05_111003` 全量守护。矩阵列错位仍归 OCR 精度极限，需 PP-Structure 或人工复核，暂不在版面层处理。
+## 7.9 本轮修复（2026-07-05 迭代十）：无合格标题时摘要回退 + 待确认事项
+
+修复 7.8 记录的 P1（`121236` 整段正文误入标题）。改动仅在 `processors/markdown_generator.py` 与测试 `tests/test_pipeline.py`。
+
+- 【P1 已修复｜标题失控取到整段正文】`_extract_title` 现返回 `(title, meta)` 二元组，`meta['source']` ∈ `heading` / `summary` / `filename`：
+  - 合格标题改为**长度硬门槛**：最佳候选必须 `best_score>30` 且 `len<=40` 才认定为真实标题；去掉此前“字号略大即放行(is_larger_font or within_len)”的宽松分支——整句正文即便 OCR 行框略高也不再当标题。
+  - 无合格候选时调用新方法 `_summarize_blocks`：按阅读顺序取正文首个非噪音块，去除行首 `>`/项目符号/引号，按句末标点（`。！？；.!?`）截首句，再按 `_SUMMARY_TITLE_MAX=30` 字硬上限、优先在 `，、：` 等自然分隔处断句，生成摘要标题。
+  - 新增 `_generate_review_note`：仅当 `meta['source']=='summary'` 时，在正文与过滤区之间输出 `> [!todo] 待确认事项（需人工核对）` 区块，说明“本页未检测到明显加大/加粗标题，标题系正文首段自动摘要生成（已限长），请人工确认或改写”，并回填摘要标题原文。`process()` 的 `note_parts` 已插入 `review_note`。
+
+- 效果（缓存全量回归，26 个样例）：仅 `121236` 走 summary 回退，标题由 52 字整句纠正为 `违约风险资本计量衡量了在突发极端情况下，企业经营情况恶化`（28 字）并附待确认区块；其余 25 个样例标题不变（heading，长度 7-31 字），无回归。
+
+- 测试：`tests/test_pipeline.py` 新增 `TestTitleExtraction`（真实标题保留、长正文回退摘要且带 todo、heading 不产生 todo）。`pytest tests/ -q` = 19 passed。
+
+- 说明：摘要标题为长句截断，与正文完整首句不同名，故 `_drop_title_row` 不会误删正文首句——标题为摘要、完整句仍保留在正文，内容不丢失。
+
+- 环境备注：本轮运行沙箱为受限模式，禁止启动仓库外可执行（系统 Python、apply_patch/codex.exe 均被拦为“拒绝访问”）。已改用“PowerShell 进程内写脚本 + 升级权限运行系统 Python 3.11”完成编辑与验证，此为此前“任务频繁中断”的根因与规避方式。
 ## 8. Git
 
 远端：`https://github.com/popyun/knowledgeImportHub`，分支 `main`，最新已推送提交 `0201c92`（Filter image noise, extract page number, split stacked tables and side notes）。
