@@ -722,7 +722,62 @@ ocr_confidence: {confidence:.2f}
             return ""
         heights = [self._block_metrics(block)["height"] for row in rows for block in row]
         median_height = sorted(heights)[len(heights) // 2] if heights else 12
-        table_gap = max(median_height * 0.7, 10)
+        # Table-boundary gap must adapt to the region's own row spacing. Some
+        # valid tables are sparse (large but *uniform* row gaps); a fixed small
+        # threshold would wrongly split every such row into its own 1-row buffer
+        # (which then fails table detection and degrades to loose text). We take
+        # the median gap between consecutive multi-column rows and only treat a
+        # gap as a stacked-table boundary when it clearly exceeds that spacing.
+        # The value is clamped to be >= the original threshold, so denser tables
+        # keep their previous behaviour and splitting can only become rarer.
+        row_bounds = [
+            (
+                min(self._block_metrics(block)["min_y"] for block in row),
+                max(self._block_metrics(block)["max_y"] for block in row),
+            )
+            for row in rows
+        ]
+        multi_rows = [row for row in rows if len(row) >= 2]
+        multi_gaps = [
+            row_bounds[i][0] - row_bounds[i - 1][1]
+            for i in range(1, len(rows))
+            if len(rows[i]) >= 2 and len(rows[i - 1]) >= 2
+        ]
+        # A real (grid) table has SHORT cell labels; a two-column *prose* layout
+        # has long sentence cells. Only genuine tables may relax the gap, so
+        # long-text multi-column regions never get merged into a table.
+        cell_lengths = [
+            len(block.get("text", "").strip())
+            for row in multi_rows for block in row
+            if block.get("text", "").strip()
+        ]
+        median_cell_len = (
+            sorted(cell_lengths)[len(cell_lengths) // 2] if cell_lengths else 999
+        )
+        # A regular sparse table has a STABLE column count across rows; a messy
+        # matrix region has wildly varying block counts per row. Only stable
+        # regions may relax the gap, so chaotic matrix layouts keep their
+        # original (pre-change) splitting behaviour.
+        block_counts = sorted(len(row) for row in multi_rows)
+        if block_counts:
+            median_blocks = block_counts[len(block_counts) // 2]
+            max_blocks = block_counts[-1]
+            stable_columns = max_blocks <= median_blocks + 1
+        else:
+            stable_columns = False
+        base_gap = max(median_height * 0.7, 10)
+        table_gap = base_gap
+        if multi_gaps and median_cell_len <= 12 and stable_columns:
+            positive_gaps = sorted(g for g in multi_gaps if g > 0)
+            if positive_gaps:
+                median_gap = positive_gaps[len(positive_gaps) // 2]
+                # Only sparse tables (row gaps that are consistently and
+                # SIGNIFICANTLY larger than the base threshold) relax the gap.
+                # Dense/stacked layouts keep base_gap unchanged, so their
+                # splitting behaviour is byte-for-byte identical to before.
+                if median_gap > base_gap * 1.5:
+                    table_gap = median_gap * 1.4
+                # else: leave table_gap == base_gap (no regression).
         chunks: List[str] = []
         buffer: List[List[Dict[str, Any]]] = []
 
