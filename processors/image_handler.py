@@ -15,6 +15,7 @@ from .ocr_router import OCRRouter, ContentType
 from .post_corrector import PostCorrector
 from .table_builder import TableBuilder
 from .markdown_generator import MarkdownGenerator
+from .table_enhancer import TableEnhancer
 from utils.file_utils import get_temp_file
 
 class ImageHandler(BaseHandler):
@@ -37,6 +38,7 @@ class ImageHandler(BaseHandler):
         self.post_corrector = PostCorrector(config)
         self.table_builder = TableBuilder(config)
         self.markdown_generator = MarkdownGenerator(config)
+        self.table_enhancer = TableEnhancer(config)
     
     def initialize(self) -> bool:
         """Initialize all processors."""
@@ -118,6 +120,23 @@ class ImageHandler(BaseHandler):
                 image_path,
                 link_candidates=[]  # Would come from entity linker
             )
+
+            # Step 5b (plan A): re-recognize low-confidence table regions with
+            # PP-Structure when enabled. Enhanced results are persisted on the
+            # OCR result (so cached re-runs render them) and attached as a
+            # review-only supplement; the plan-B main output is never replaced.
+            if self.table_enhancer.enabled:
+                regions = list(self.markdown_generator._low_quality_regions)
+                if regions:
+                    self.logger.debug("Step 5b: enhancing %d low-confidence region(s)", len(regions))
+                    enhanced_tables = self.table_enhancer.enhance_regions(enhanced_image, regions)
+                    if enhanced_tables:
+                        corrected_result["enhanced_tables"] = enhanced_tables
+                        markdown = self.markdown_generator.process(
+                            corrected_result,
+                            image_path,
+                            link_candidates=[]
+                        )
             
             # Populate result
             result["success"] = True

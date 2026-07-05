@@ -33,6 +33,12 @@ ocr:
     lang: "ch"
     recovery: true
     show_log: false
+    # Plan A: re-recognize low-confidence table regions with PP-Structure.
+    # Off by default (each region costs several seconds); enable to attach a
+    # review-only enhanced table under the low-confidence warning.
+    enhance_on_low_quality: false
+    crop_pad: 14
+    max_enhance_regions: 4
   ollama:
     model: "qwen2.5:1.5b"
     endpoint: "http://localhost:11434"

@@ -365,6 +365,105 @@ class TestTableQuality:
         assert "\u589e\u5f3a\u8bc6\u522b" in md
 
 
+class TestTableEnhancer:
+    """Plan-A PP-Structure enhancement: config gate + review-only attach."""
+
+    def _gen(self):
+        from processors.markdown_generator import MarkdownGenerator
+        return MarkdownGenerator({})
+
+    def _cell(self, cx, cy, w=30, h=18):
+        x0, x1 = cx - w / 2, cx + w / 2
+        y0, y1 = cy - h / 2, cy + h / 2
+        return {"type": "text", "text": "x", "confidence": 0.9,
+                "bbox": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]}
+
+    def _low_quality_rows(self):
+        anchors = [10 + i * 60 for i in range(14)]
+        rows = []
+        for y in (10, 40, 70, 100):
+            row = [self._cell(a, y) for a in anchors]
+            row.append(self._cell(18, y))
+            row.append(self._cell(78, y))
+            rows.append(row)
+        return rows
+
+    def test_enhancer_disabled_by_default(self):
+        from processors.table_enhancer import TableEnhancer
+        enh = TableEnhancer({})
+        assert enh.enabled is False
+        # Disabled enhancer returns nothing even with regions.
+        assert enh.enhance_regions(object(), [{"bbox": [0, 0, 10, 10]}]) == []
+
+    def test_enhancer_config_toggle(self):
+        from processors.table_enhancer import TableEnhancer
+        enh = TableEnhancer({"ocr": {"table_structure": {"enhance_on_low_quality": True}}})
+        assert enh.enabled is True
+
+    def test_first_table_html_extraction(self):
+        from processors.table_enhancer import TableEnhancer
+        raw = [
+            {"type": "text", "res": {"html": "<p>ignore</p>"}},
+            {"type": "table", "res": {"html": "<table><tr><td>a</td></tr></table>"}},
+        ]
+        assert TableEnhancer._first_table_html(raw) == "<table><tr><td>a</td></tr></table>"
+        assert TableEnhancer._first_table_html([]) is None
+        assert TableEnhancer._first_table_html([{"type": "table", "res": {}}]) is None
+
+    def test_low_quality_region_is_recorded(self):
+        gen = self._gen()
+        gen.process({"blocks": [], "tables": []}, "x.jpg", [])  # reset state
+        md = gen._render_markdown_table(self._low_quality_rows())
+        assert "[!warning]" in md
+        assert len(gen._low_quality_regions) == 1
+        reg = gen._low_quality_regions[0]
+        assert reg["bbox"][0] <= reg["bbox"][2] and reg["bbox"][1] <= reg["bbox"][3]
+        assert reg["n_cols"] == 14
+
+    def test_enhanced_block_attaches_for_matching_region(self):
+        gen = self._gen()
+        rows = self._low_quality_rows()
+        # Pass 1 (no enhancement): capture the low-confidence region bbox, the
+        # same way process() collects it before plan A runs.
+        gen._enhanced_tables = []
+        gen._low_quality_regions = []
+        gen._table_quality_log = []
+        gen._render_markdown_table(rows)
+        assert gen._low_quality_regions
+        bbox = gen._low_quality_regions[0]["bbox"]
+        # Pass 2: process() would set _enhanced_tables from the OCR result, then
+        # body rendering calls _render_markdown_table again -> attach.
+        gen._enhanced_tables = [{
+            "html": "<table><tr><td>c1</td><td>c2</td></tr><tr><td>a</td><td>b</td></tr></table>",
+            "region": {"bbox": bbox},
+            "engine": "ppstructure",
+        }]
+        gen._low_quality_regions = []
+        gen._table_quality_log = []
+        md2 = gen._render_markdown_table(rows)
+        assert "\u589e\u5f3a\u8bc6\u522b\u7ed3\u679c" in md2  # enhanced-result tip
+
+    def test_enhanced_block_ignored_when_region_mismatch(self):
+        gen = self._gen()
+        rows = self._low_quality_rows()
+        gen._enhanced_tables = [{
+            "html": "<table><tr><td>c1</td></tr></table>",
+            "region": {"bbox": [99990, 99990, 99999, 99999]},  # far away, IoU=0
+            "engine": "ppstructure",
+        }]
+        gen._low_quality_regions = []
+        gen._table_quality_log = []
+        md = gen._render_markdown_table(rows)
+        assert "[!warning]" in md  # still low-confidence
+        assert "\u589e\u5f3a\u8bc6\u522b\u7ed3\u679c" not in md
+
+    def test_bbox_iou(self):
+        from processors.markdown_generator import MarkdownGenerator
+        assert MarkdownGenerator._bbox_iou([0, 0, 10, 10], [0, 0, 10, 10]) == 1.0
+        assert MarkdownGenerator._bbox_iou([0, 0, 10, 10], [100, 100, 110, 110]) == 0.0
+        assert 0.0 < MarkdownGenerator._bbox_iou([0, 0, 10, 10], [5, 5, 15, 15]) < 1.0
+
+
 class TestLinkHelpers:
     """Test link helper functions."""
     

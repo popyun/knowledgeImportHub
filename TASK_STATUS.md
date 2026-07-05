@@ -316,6 +316,19 @@ python -c "import io; print(io.open(r'D:\test-temp\ocr_output\99-Audit\OCR-Pendi
 - 【已知限制｜方案 A territory】`121134` 底部 8 列表实为并排合并表（加权敏感度表 + CSR WEIGHT 表），列间距无明显天沟，几何法无法拆分，且质量分 0.85（高于阈值）不触发告警——这正是方案 A（PP-Structure）后续要处理的场景。不下调阈值去硬抓它（会误标大量 0.77-0.85 的正常表）。
 - `pytest tests/ -q` = 35 passed（新增 `TestTableQuality` 5 项：清晰网格高分、宽矩阵低分、天沟拆分并排表、小表不拆、低质量表追加告警）。
 
+## 7.15 本轮开发（2026-07-05 迭代十六）：方案 A——PP-Structure 低置信区域增强（按需触发、零负面影响）
+
+按用户批准的“方案 B 先行、方案 A 兜底”落地方案 A。改动文件：新增 `processors/table_enhancer.py`，改 `processors/markdown_generator.py`、`processors/image_handler.py`、`config.yaml`、`tests/test_pipeline.py`。
+
+- 【调研结论｜关键约束】在本套彩色幻灯片语料上实测：PP-Structure 整页 layout 会把幻灯片误判成一个 `figure`，切不出表；对低分“伪表格”（`121125` 相关系数矩阵、`121238` 宽扁说明块）裁剪后识别结果比方案 B 更差；对真正并排合并表（`121134` 目标区）裁剪后仍是错乱结果。结论：PP-Structure 在此语料上不能稳定优于方案 B。因此方案 A 采用“**纯附加、绝不替换主输出**”的形态，把增强结果作为“供人工比对”的补充块附在低置信告警下。
+- 【新增｜TableEnhancer】`processors/table_enhancer.py`：懒加载 `PPStructure(layout=False, table=True, ocr=True)`，只对方案 B 上报的低置信区域裁剪（增强图/OCR 坐标系，`crop_pad` 默认 14），返回 `{html, region, engine}`。默认关闭（`enhance_on_low_quality: false`），每区域约数秒；`max_enhance_regions` 默认 4。
+- 【接入｜markdown_generator】`_render_markdown_table` 在 `score < _TABLE_QUALITY_MIN=0.62` 时，除告警外记录该区域 bbox 到 `self._low_quality_regions`（`_rows_bbox`），并在 `self._enhanced_tables`（来自 `ocr_result["enhanced_tables"]`）中按 `_bbox_iou >= 0.5` 匹配，命中则追加 `> [!tip] 增强识别结果（PP-Structure，供人工比对，未替换上方主输出）` + 增强表 markdown。主输出（方案 B 表格）位置与内容保持不变。
+- 【接入｜image_handler】两趟渲染：Step 5 先渲染收集 `_low_quality_regions`；若 `table_enhancer.enabled` 且有低置信区域，Step 5b 对 `enhanced_image` 裁剪跑增强，结果写回 `corrected_result["enhanced_tables"]`（**持久化，供缓存复跑渲染**）后重渲染。
+- 【降级/安全】增强器 import/init/推理失败均静默降级返回空，绝不影响主流程；开关默认关闭，正常路径零额外耗时。
+- 【回归验证】开关关闭时，全 33 张缓存语料输出与 HEAD `1259535`（方案 B）**逐字节零差异**（`byte-diffs vs HEAD: 0`）——方案 A 纯附加、零负面影响。真实全链路（`ImageHandler` 开启方案 A 跑 `121125`）跑通：成功识别、生成 2 个增强表、附加 tip 块，主流程无异常（约 89s，含 OCR + 2 次 PP-Structure）。
+- `pytest tests/ -q` = 42 passed（新增 `TestTableEnhancer` 7 项：默认关闭、配置开关、`_first_table_html` 提取、低置信区域记录、匹配区域附加增强块、不匹配区域不附加、`_bbox_iou`）。
+- 【后续可选】若要让方案 A 真正“增强”而非“比对”，需更强的表格模型或对彩色表做去底色/网格线增强预处理；当前语料下 PP-Structure 未达该标准，故保持 review-only + 默认关闭。
+
 ## 8. Git
 
 远端：`https://github.com/popyun/knowledgeImportHub`，分支 `main`，最新已推送提交 `0201c92`（Filter image noise, extract page number, split stacked tables and side notes）。

@@ -26,6 +26,10 @@ class MarkdownGenerator(BaseHandler):
         self.logger = logging.getLogger("ocr_pipeline")
         # Per-run log of rendered-table quality scores (for the B->A gate).
         self._table_quality_log = []
+        # Per-run low-confidence table regions (bbox in OCR space) that plan A
+        # (PP-Structure) may re-recognize, plus any enhanced results to attach.
+        self._low_quality_regions = []
+        self._enhanced_tables = []
     
     def process(
         self,
@@ -46,6 +50,10 @@ class MarkdownGenerator(BaseHandler):
         """
         # Reset per-call table quality log (B->A gate diagnostics).
         self._table_quality_log = []
+        self._low_quality_regions = []
+        # Enhanced (plan A) tables are persisted on the OCR result so cached
+        # re-runs (which bypass ImageHandler) still render them.
+        self._enhanced_tables = ocr_result.get("enhanced_tables", []) or []
 
         # Extract components
         blocks = ocr_result.get("blocks", [])
@@ -979,14 +987,81 @@ ocr_confidence: {confidence:.2f}
         self._table_quality_log.append(quality)
         parts = []
         if quality["score"] < self._TABLE_QUALITY_MIN:
+            bbox = self._rows_bbox(rows)
+            self._low_quality_regions.append({
+                "bbox": bbox,
+                "quality": round(quality["score"], 3),
+                "n_cols": int(quality["n_cols"]),
+            })
             parts.append(
                 "> [!warning] 表格结构复杂，普通方式识别置信度低"
                 f"（quality={quality['score']:.2f}, 列数={int(quality['n_cols'])}）。"
                 "已尽力还原，建议启用增强识别（PP-Structure）或人工核对原图。"
             )
-        parts.append(table_md)
+            parts.append(table_md)
+            enhanced = self._enhanced_block_for_region(bbox)
+            if enhanced:
+                parts.append(enhanced)
+        else:
+            parts.append(table_md)
         parts.append(side_notes)
         return "\n\n".join(part for part in parts if part)
+
+    def _rows_bbox(self, rows: List[List[Dict[str, Any]]]) -> List[int]:
+        """Return the [x0, y0, x1, y1] bounding box (OCR space) of a row group."""
+        xs: List[float] = []
+        ys: List[float] = []
+        for row in rows:
+            for block in row:
+                m = self._block_metrics(block)
+                xs.extend([m["min_x"], m["max_x"]])
+                ys.extend([m["min_y"], m["max_y"]])
+        if not xs:
+            return [0, 0, 0, 0]
+        return [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
+
+    @staticmethod
+    def _bbox_iou(a: List[int], b: List[int]) -> float:
+        """Intersection-over-union of two [x0, y0, x1, y1] boxes."""
+        ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
+        ix1, iy1 = min(a[2], b[2]), min(a[3], b[3])
+        iw, ih = max(ix1 - ix0, 0), max(iy1 - iy0, 0)
+        inter = iw * ih
+        if inter <= 0:
+            return 0.0
+        area_a = max(a[2] - a[0], 0) * max(a[3] - a[1], 0)
+        area_b = max(b[2] - b[0], 0) * max(b[3] - b[1], 0)
+        union = area_a + area_b - inter
+        return inter / union if union > 0 else 0.0
+
+    def _enhanced_block_for_region(self, bbox: List[int]) -> str:
+        """Attach the plan-A (PP-Structure) result for a low-confidence region.
+
+        The enhanced table is emitted as a review-only supplement under the
+        warning; it never replaces the plan-B main output, so enabling plan A
+        can only add information (zero regression on the primary rendering).
+        """
+        if not self._enhanced_tables:
+            return ""
+        best = None
+        best_iou = 0.0
+        for item in self._enhanced_tables:
+            region = item.get("region", {}) or {}
+            ebbox = region.get("bbox")
+            if not ebbox or len(ebbox) != 4:
+                continue
+            iou = self._bbox_iou(bbox, [int(v) for v in ebbox])
+            if iou > best_iou:
+                best_iou, best = iou, item
+        if best is None or best_iou < 0.5:
+            return ""
+        markdown_table = self._html_table_to_markdown(best.get("html", ""))
+        if not markdown_table:
+            return ""
+        return (
+            "> [!tip] 增强识别结果（PP-Structure，供人工比对，未替换上方主输出）：\n\n"
+            + markdown_table
+        )
 
     def _render_single_table(self, rows: List[List[Dict[str, Any]]], columns: List[float]) -> str:
         """Snap rows onto ``columns`` and emit a Markdown table (no scoring)."""
