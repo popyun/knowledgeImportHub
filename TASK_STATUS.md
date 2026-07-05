@@ -256,6 +256,20 @@ python -c "import io; print(io.open(r'D:\test-temp\ocr_output\99-Audit\OCR-Pendi
 - 说明：摘要标题为长句截断，与正文完整首句不同名，故 `_drop_title_row` 不会误删正文首句——标题为摘要、完整句仍保留在正文，内容不丢失。
 
 - 环境备注：本轮运行沙箱为受限模式，禁止启动仓库外可执行（系统 Python、apply_patch/codex.exe 均被拦为“拒绝访问”）。已改用“PowerShell 进程内写脚本 + 升级权限运行系统 Python 3.11”完成编辑与验证，此为此前“任务频繁中断”的根因与规避方式。
+## 7.10 本轮修复（2026-07-05 迭代十一）：摘要标题保留语义完整性（三档）
+
+在 7.9 摘要回退基础上，按需求加入“保留标题语义完整性”的分档逻辑。改动仅在 `processors/markdown_generator.py` 与 `tests/test_pipeline.py`。
+
+- 常量：`_SUMMARY_TITLE_MAX=30`（字数上限），新增 `_SUMMARY_OVERFLOW_TOLERANCE=0.30`（超限容忍比例）。
+
+- `_summarize_blocks` 改为返回 `(title, mode)`，取正文首句（按 `。！？；.!?` 断句）后分三档：
+  - `complete`：首句 `<=30` 字，直接用。
+  - `tolerated`：首句超限但超出比例 `<30%`（31-38 字），**保留完整首句不截断**，以保证语义完整。
+  - `condensed`：首句超限 `>=30%`（`>=39` 字），调用新方法 `_condense_phrase` 做语义压缩——按 `，、：,;` 分句累积前若干完整子句直到接近上限，实在过长再按最后分隔符硬窗口截断，形成不超上限的连贯短语。
+
+- `_generate_review_note` 按 `meta['summary_mode']` 输出差异化待确认文案：`condensed` 标注“语义压缩、可能损失部分语义”；`tolerated` 标注“略超上限但在 30% 内、为保留语义完整未截断”；其余为通用摘要说明。仅 `source=='summary'` 时才产生 `> [!todo] 待确认事项` 区块。
+
+- 验证：构造样例 A(16字)=complete、B(36字,超20%)=tolerated 完整保留、C(56字,超87%)=condensed 压到28字，均符合预期。全量缓存回归 33 样例：32 个 heading 标题不变，仅 `121236` 走 `summary/condensed`（28 字 + 待确认区块），无回归。`pytest tests/ -q` = 22 passed（新增三档模式测试）。
 ## 8. Git
 
 远端：`https://github.com/popyun/knowledgeImportHub`，分支 `main`，最新已推送提交 `0201c92`（Filter image noise, extract page number, split stacked tables and side notes）。

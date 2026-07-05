@@ -219,6 +219,38 @@ class TestTitleExtraction:
         note = gen._generate_review_note("A Title", {"source": "heading"})
         assert note == ""
 
+    def test_summary_complete_when_short(self):
+        gen = self._gen()
+        s = "\u8fdd\u7ea6\u98ce\u9669\u8d44\u672c\u8ba1\u91cf\u7684\u8303\u56f4\u4e0e\u671f\u9650\u8bf4\u660e"
+        blocks = [self._row(s, 10, 90, x1=3300)]
+        title, mode = gen._summarize_blocks(blocks)
+        assert mode == "complete"
+        assert title == s
+
+    def test_summary_tolerated_small_overflow_keeps_whole(self):
+        gen = self._gen()
+        # 36 chars: overflow (36-30)/30 = 20% < 30% -> keep whole, mode tolerated
+        s = "\u8fdd\u7ea6\u98ce\u9669\u8d44\u672c\u8ba1\u91cf\u8861\u91cf\u4e86\u5728\u7a81\u53d1\u6781\u7aef\u60c5\u51b5\u4e0b\u4f01\u4e1a\u7ecf\u8425\u6076\u5316\u7684\u60c5\u5f62\u5171\u4e09\u5341\u4e94\u5b57\u7b26\u6d4b\u8bd5"
+        assert len(s) == 36
+        blocks = [self._row(s, 10, 90, x1=3300)]
+        title, mode = gen._summarize_blocks(blocks)
+        assert mode == "tolerated"
+        assert title == s
+        assert len(title) > gen._SUMMARY_TITLE_MAX
+        note = gen._generate_review_note(title, {"source": "summary", "summary_mode": mode})
+        assert "[!todo]" in note and "30%" in note
+
+    def test_summary_condensed_large_overflow(self):
+        gen = self._gen()
+        s = "\u8fdd\u7ea6\u98ce\u9669\u8d44\u672c\u8ba1\u91cf\u8861\u91cf\u4e86\u5728\u7a81\u53d1\u6781\u7aef\u60c5\u51b5\u4e0b\uff0c\u4f01\u4e1a\u7ecf\u8425\u60c5\u51b5\u6076\u5316\uff0c\u9020\u6210\u4f01\u4e1a\u6240\u53d1\u884c\u7684\u80a1\u7968\u3001\u503a\u5238\u4ef7\u683c\u5728\u77ed\u65f6\u95f4\u5185\u5267\u70c8\u6ce2\u52a8\u7684\u98ce\u9669"
+        blocks = [self._row(s, 10, 90, x1=3300)]
+        title, mode = gen._summarize_blocks(blocks)
+        assert mode == "condensed"
+        assert len(title) <= gen._SUMMARY_TITLE_MAX
+        assert title != s
+        note = gen._generate_review_note(title, {"source": "summary", "summary_mode": mode})
+        assert "[!todo]" in note and title in note
+
 class TestLinkHelpers:
     """Test link helper functions."""
     

@@ -203,23 +203,31 @@ ocr_confidence: {confidence:.2f}
                 return best_text.replace('"', "'")[:120], {"source": "heading"}
 
         # No clear heading: summarize the leading body content into a short title.
-        summary = self._summarize_blocks(text_blocks)
+        summary, summary_mode = self._summarize_blocks(text_blocks)
         if summary:
-            return summary, {"source": "summary"}
+            return summary, {"source": "summary", "summary_mode": summary_mode}
 
         filename = source_path.split("/")[-1].split("\\")[-1]
         return filename.rsplit(".", 1)[0], {"source": "filename"}
 
-    # Max characters kept for an auto-summarized (fallback) title.
+    # Max characters targeted for an auto-summarized (fallback) title.
     _SUMMARY_TITLE_MAX = 30
+    # Allowed overflow ratio: if the first coherent sentence exceeds the limit
+    # by less than this, keep it whole to preserve full semantics; otherwise
+    # condense it into a summary and flag for human review.
+    _SUMMARY_OVERFLOW_TOLERANCE = 0.30
 
-    def _summarize_blocks(self, text_blocks: List[Dict[str, Any]]) -> str:
-        """Build a short title by summarizing the leading body text.
+    def _summarize_blocks(self, text_blocks: List[Dict[str, Any]]) -> Tuple[str, str]:
+        """Summarize leading body text into a short title, preserving meaning.
 
-        Used only when the page has no clear large-font heading. Takes the
-        first content block in reading order, strips leading markers/quotes,
-        cuts at the first sentence boundary and hard-caps the length so a whole
-        paragraph never becomes the title.
+        Used only when the page has no clear large-font heading. Returns a
+        ``(title, mode)`` tuple where ``mode`` is one of:
+          - ``"complete"``  : first sentence already fits the limit.
+          - ``"tolerated"`` : first sentence overflows the limit by < 30%; kept
+            whole to preserve semantic completeness (soft over-limit).
+          - ``"condensed"`` : first sentence overflows by >= 30%; condensed into
+            a shorter phrase (semantics may be lossy -> needs human review).
+        Returns ``("", "")`` when no usable body text exists.
         """
         ordered = sorted(text_blocks, key=lambda b: (self._block_metrics(b)["min_y"], self._block_metrics(b)["min_x"]))
         first_text = ""
@@ -229,34 +237,87 @@ ocr_confidence: {confidence:.2f}
                 first_text = candidate
                 break
         if not first_text:
-            return ""
+            return "", ""
         # Drop leading blockquote/list markers and quote glyphs.
         cleaned = first_text.lstrip(">>#*-–—•· \t\u3000").strip()
         cleaned = cleaned.replace('"', "'")
-        # Cut at the first sentence-ending punctuation to keep a coherent phrase.
-        cut = re.split(r"[。！？；;.!?]", cleaned, maxsplit=1)[0].strip()
-        if not cut:
-            cut = cleaned
+        # First coherent sentence (cut at the first sentence-ending punctuation).
+        sentence = re.split(r"[。！？；;.!?]", cleaned, maxsplit=1)[0].strip()
+        if not sentence:
+            sentence = cleaned
+
         limit = self._SUMMARY_TITLE_MAX
-        if len(cut) > limit:
-            # Prefer to break on a natural separator within the limit.
-            window = cut[:limit]
-            break_pos = max(window.rfind(sep) for sep in ("，", "、", "：", ",", " "))
-            if break_pos >= limit // 2:
-                cut = window[:break_pos]
+        if len(sentence) <= limit:
+            return sentence.strip(), "complete"
+
+        # Overflow past the limit. Decide by how far it overflows.
+        overflow_ratio = (len(sentence) - limit) / limit
+        if overflow_ratio < self._SUMMARY_OVERFLOW_TOLERANCE:
+            # Small overflow: keep the whole sentence to preserve full semantics.
+            return sentence.strip(), "tolerated"
+
+        # Large overflow: condense into a coherent phrase within the limit,
+        # breaking on a natural separator so the title stays meaningful.
+        condensed = self._condense_phrase(sentence, limit)
+        return condensed, "condensed"
+
+    def _condense_phrase(self, sentence: str, limit: int) -> str:
+        """Cut a long sentence to a coherent phrase within ``limit`` chars.
+
+        Accumulate leading clauses split on Chinese/ASCII separators until
+        adding the next clause would exceed the limit; fall back to a hard
+        window (broken on the last separator) when even the first clause is
+        too long.
+        """
+        tokens = re.split(r"([，、：,;])", sentence)
+        # Rebuild into (clause, trailing_separator) pairs.
+        pairs = []
+        for idx in range(0, len(tokens), 2):
+            clause = tokens[idx]
+            sep = tokens[idx + 1] if idx + 1 < len(tokens) else ""
+            pairs.append((clause, sep))
+        acc = ""
+        for clause, sep in pairs:
+            candidate = acc + clause
+            if len(candidate) <= limit:
+                acc = candidate + sep
             else:
-                cut = window
-        return cut.strip()
+                break
+        acc = acc.rstrip("，、：,; ")
+        if acc:
+            return acc.strip()
+        # Even the first clause exceeds the limit: hard window on last separator.
+        window = sentence[:limit]
+        break_pos = max(window.rfind(sep) for sep in ("，", "、", "：", ",", " "))
+        if break_pos >= limit // 2:
+            return window[:break_pos].strip()
+        return window.strip()
 
     def _generate_review_note(self, title: str, title_meta: Dict[str, Any]) -> str:
         """Emit a human-confirmation note for auto-synthesized content."""
         if not title_meta or title_meta.get("source") != "summary":
             return ""
+        mode = title_meta.get("summary_mode", "")
+        if mode == "condensed":
+            detail = (
+                "系由正文首段语义压缩生成（首句超出字数上限 30% 以上，已总结为短语，"
+                "可能损失部分语义）。请人工确认标题是否准确或改写。"
+            )
+        elif mode == "tolerated":
+            detail = (
+                "系取正文首句完整生成（略超字数上限但在 30% 以内，为保留语义完整性未截断）。"
+                "请人工确认标题是否准确或改写。"
+            )
+        else:
+            detail = (
+                "系由正文首段自动摘要生成（已限长）。原图多为纯文本稀疏页，"
+                "请人工确认标题是否准确或改写。"
+            )
         return (
             "> [!todo] 待确认事项（需人工核对）\n"
-            "> - 本页未检测到明显的加大/加粗标题；标题 `" + title + "` "
-            "系由正文首段自动摘要生成（已限长）。原图多为纯文本稀疏页，请人工确认标题是否准确或改写。"
+            "> - 本页未检测到明显的加大/加粗标题；标题 `" + title + "` " + detail
         )
+
     def _is_toolbar_noise(self, text: str) -> bool:
         """Return True for UI toolbar or footer OCR noise."""
         return self._noise_kind(text) is not None
