@@ -24,6 +24,8 @@ class MarkdownGenerator(BaseHandler):
         """
         super().__init__(config)
         self.logger = logging.getLogger("ocr_pipeline")
+        # Per-run log of rendered-table quality scores (for the B->A gate).
+        self._table_quality_log = []
     
     def process(
         self,
@@ -42,6 +44,9 @@ class MarkdownGenerator(BaseHandler):
         Returns:
             Complete Markdown string
         """
+        # Reset per-call table quality log (B->A gate diagnostics).
+        self._table_quality_log = []
+
         # Extract components
         blocks = ocr_result.get("blocks", [])
         tables = ocr_result.get("tables", [])
@@ -772,6 +777,119 @@ ocr_confidence: {confidence:.2f}
                 aligned_rows += 1
         return aligned_rows >= 2 and aligned_rows / len(rows) >= 0.6
 
+    # Column count above which a region is treated as a wide matrix / multiple
+    # side-by-side tables that the geometric reconstructor cannot align well.
+    _WIDE_TABLE_COLS = 9
+    # Quality below which a rendered table is flagged as low-confidence (the
+    # gate that would trigger the PP-Structure enhancement path, plan A).
+    _TABLE_QUALITY_MIN = 0.62
+
+    def _table_quality(self, rows: List[List[Dict[str, Any]]], columns: List[float]) -> Dict[str, float]:
+        """Score how well a set of OCR rows reconstructs into a grid.
+
+        Returns a dict with the component metrics plus a combined ``score`` in
+        [0, 1]. All signals come from block bounding boxes (no model needed):
+          - ``fill``       : filled cells / (rows x cols); low when a matrix
+                             leaves many empty cells after column snapping.
+          - ``align``      : 1 - normalized median offset of each cell centre
+                             from its snapped column anchor (low when columns
+                             drift / cells straddle anchors).
+          - ``stab``       : consistency of per-row column counts (low when a
+                             messy matrix has wildly varying blocks per row).
+          - ``col_penalty``: penalty growing past ``_WIDE_TABLE_COLS`` columns.
+          - ``collision``  : fraction of rows where two blocks snap to the same
+                             column (a strong sign of merged side-by-side tables
+                             or drifted anchors).
+        """
+        n_cols = len(columns)
+        if n_cols < 2 or not rows:
+            return {"fill": 0.0, "align": 0.0, "stab": 0.0, "collision": 1.0,
+                    "col_penalty": 1.0, "score": 0.0, "n_cols": float(n_cols)}
+        col_gap = 1.0
+        if n_cols >= 2:
+            gaps = [columns[i + 1] - columns[i] for i in range(n_cols - 1)]
+            col_gap = max(sorted(gaps)[len(gaps) // 2], 1.0)
+
+        filled = 0
+        offsets: List[float] = []
+        per_row_counts: List[int] = []
+        collision_rows = 0
+        for row in rows:
+            used: Dict[int, int] = {}
+            for block in row:
+                cx = self._block_metrics(block)["center_x"]
+                idx = min(range(n_cols), key=lambda i: abs(columns[i] - cx))
+                offsets.append(abs(columns[idx] - cx))
+                used[idx] = used.get(idx, 0) + 1
+            filled += len(used)
+            per_row_counts.append(len(used))
+            if any(v >= 2 for v in used.values()):
+                collision_rows += 1
+
+        n_rows = len(rows)
+        fill = filled / float(n_rows * n_cols)
+        median_offset = sorted(offsets)[len(offsets) // 2] if offsets else 0.0
+        align = max(0.0, 1.0 - (median_offset / (col_gap * 0.5)))
+        # Stability: 1 - normalized spread of per-row column counts.
+        if per_row_counts:
+            mean_c = sum(per_row_counts) / len(per_row_counts)
+            var = sum((c - mean_c) ** 2 for c in per_row_counts) / len(per_row_counts)
+            stab = max(0.0, 1.0 - (var ** 0.5) / max(mean_c, 1.0))
+        else:
+            stab = 0.0
+        collision = collision_rows / float(n_rows)
+        col_penalty = max(0.0, (n_cols - self._WIDE_TABLE_COLS) / float(self._WIDE_TABLE_COLS))
+        col_penalty = min(col_penalty, 1.0)
+
+        score = (
+            0.30 * fill
+            + 0.30 * align
+            + 0.20 * stab
+            + 0.20 * (1.0 - collision)
+            - 0.35 * col_penalty
+        )
+        score = max(0.0, min(1.0, score))
+        return {"fill": fill, "align": align, "stab": stab, "collision": collision,
+                "col_penalty": col_penalty, "score": score, "n_cols": float(n_cols)}
+
+    def _split_columns_by_gutter(
+        self, rows: List[List[Dict[str, Any]]], columns: List[float]
+    ) -> Optional[Tuple[List[List[Dict[str, Any]]], List[List[Dict[str, Any]]], float]]:
+        """Split rows into two side-by-side tables at the widest column gutter.
+
+        Only splits when a clearly-dominant gutter exists (widest column gap
+        >= 1.8x the median gap) and both sides keep at least two columns, so a
+        normal single table is never fractured. Returns ``(left_rows,
+        right_rows, split_x)`` or ``None``.
+        """
+        n_cols = len(columns)
+        # Only wide regions (two side-by-side tables => many columns) may be
+        # gutter-split; small 4-6 column tables are left intact because
+        # splitting them tends to fragment a single genuine table.
+        if n_cols < 8:
+            return None
+        cols = sorted(columns)
+        gaps = [(cols[i + 1] - cols[i], (cols[i] + cols[i + 1]) / 2, i) for i in range(n_cols - 1)]
+        median_gap = sorted(g[0] for g in gaps)[len(gaps) // 2]
+        gap, split_x, idx = max(gaps, key=lambda x: x[0])
+        if gap < median_gap * 1.8:
+            return None
+        # Both sides must retain >= 2 columns to be independent tables.
+        if idx + 1 < 2 or (n_cols - (idx + 1)) < 2:
+            return None
+        left_rows: List[List[Dict[str, Any]]] = []
+        right_rows: List[List[Dict[str, Any]]] = []
+        for row in rows:
+            lft = [b for b in row if self._block_metrics(b)["center_x"] <= split_x]
+            rgt = [b for b in row if self._block_metrics(b)["center_x"] > split_x]
+            if lft:
+                left_rows.append(lft)
+            if rgt:
+                right_rows.append(rgt)
+        if len(left_rows) < 2 or len(right_rows) < 2:
+            return None
+        return left_rows, right_rows, split_x
+
     def _estimate_columns(self, rows: List[List[Dict[str, Any]]]) -> List[float]:
         """Cluster block center-x positions into column anchors (centroids)."""
         centers = sorted(
@@ -828,12 +946,50 @@ ocr_confidence: {confidence:.2f}
         return row_height >= median_height * 1.35
 
     def _render_markdown_table(self, rows: List[List[Dict[str, Any]]]) -> str:
-        """Render OCR rows as a Markdown table."""
+        """Render OCR rows as a Markdown table.
+
+        Plan-B pipeline: (1) peel off side notes, (2) if a dominant column
+        gutter exists, split into independent side-by-side tables and render
+        each on its own, (3) otherwise render a single grid and score its
+        reconstruction quality; a low score is annotated as low-confidence so
+        the wide-matrix / enhancement (plan A) path can pick it up.
+        """
         rows, side_notes = self._separate_side_notes(rows)
         columns = self._estimate_columns(rows)
         if len(columns) < 2:
             body = self._render_rows(rows)
             return "\n\n".join(part for part in [body, side_notes] if part)
+
+        # (2) Split clearly separated side-by-side tables at the widest gutter.
+        split = self._split_columns_by_gutter(rows, columns)
+        if split is not None:
+            left_rows, right_rows, _split_x = split
+            left_md = self._render_markdown_table(left_rows)
+            right_md = self._render_markdown_table(right_rows)
+            parts = [left_md, right_md, side_notes]
+            return "\n\n".join(part for part in parts if part)
+
+        # (3) Single grid: render + score.
+        table_md = self._render_single_table(rows, columns)
+        if not table_md:
+            body = self._render_rows(rows)
+            return "\n\n".join(part for part in [body, side_notes] if part)
+
+        quality = self._table_quality(rows, columns)
+        self._table_quality_log.append(quality)
+        parts = []
+        if quality["score"] < self._TABLE_QUALITY_MIN:
+            parts.append(
+                "> [!warning] 表格结构复杂，普通方式识别置信度低"
+                f"（quality={quality['score']:.2f}, 列数={int(quality['n_cols'])}）。"
+                "已尽力还原，建议启用增强识别（PP-Structure）或人工核对原图。"
+            )
+        parts.append(table_md)
+        parts.append(side_notes)
+        return "\n\n".join(part for part in parts if part)
+
+    def _render_single_table(self, rows: List[List[Dict[str, Any]]], columns: List[float]) -> str:
+        """Snap rows onto ``columns`` and emit a Markdown table (no scoring)."""
         normalized_rows = []
         for row in rows:
             cells = [""] * len(columns)
@@ -847,8 +1003,7 @@ ocr_confidence: {confidence:.2f}
             if any(cells):
                 normalized_rows.append(cells)
         if len(normalized_rows) < 2:
-            body = self._render_rows(rows)
-            return "\n\n".join(part for part in [body, side_notes] if part)
+            return ""
         col_count = len(columns)
         padded = [row + [""] * (col_count - len(row)) for row in normalized_rows]
         lines = [
@@ -857,8 +1012,7 @@ ocr_confidence: {confidence:.2f}
         ]
         for row in padded[1:]:
             lines.append("| " + " | ".join(row) + " |")
-        table_md = "\n".join(lines)
-        return "\n\n".join(part for part in [table_md, side_notes] if part)
+        return "\n".join(lines)
 
     def _separate_side_notes(
         self, rows: List[List[Dict[str, Any]]]

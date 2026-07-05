@@ -300,6 +300,71 @@ class TestTitleExtraction:
         # "\u6f14\u793a\u4e0a\u5177" (OCR typo of "\u6f14\u793a\u5de5\u5177") short + margin -> toolbar.
         assert gen._noise_kind("\u6f14\u793a\u4e0a\u5177\u00b7", in_margin=True) == "toolbar"
 
+class TestTableQuality:
+    """Plan-B geometric table reconstruction: quality gate + gutter split."""
+
+    def _gen(self):
+        from processors.markdown_generator import MarkdownGenerator
+        return MarkdownGenerator({})
+
+    def _cell(self, cx, cy, w=30, h=18):
+        x0, x1 = cx - w / 2, cx + w / 2
+        y0, y1 = cy - h / 2, cy + h / 2
+        return {"type": "text", "text": "x", "confidence": 0.9,
+                "bbox": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]}
+
+    def test_clean_grid_scores_high(self):
+        gen = self._gen()
+        cols = [50, 150, 250]
+        rows = [[self._cell(c, y) for c in cols] for y in (10, 40, 70, 100)]
+        q = gen._table_quality(rows, cols)
+        assert q["score"] >= gen._TABLE_QUALITY_MIN
+        assert q["score"] > 0.9
+
+    def test_wide_garbled_matrix_scores_low(self):
+        gen = self._gen()
+        cols = [10 + i * 20 for i in range(14)]
+        rows = []
+        for y in (10, 40, 70):
+            row = [self._cell(c, y) for c in cols]
+            row.append(self._cell(12, y))  # forces a same-column collision
+            rows.append(row)
+        q = gen._table_quality(rows, cols)
+        assert q["n_cols"] == 14
+        assert q["collision"] > 0.0
+        assert q["score"] < gen._TABLE_QUALITY_MIN
+
+    def test_gutter_split_separates_side_by_side(self):
+        gen = self._gen()
+        cols = [10, 30, 50, 70, 200, 220, 240, 260]
+        rows = [[self._cell(c, y) for c in cols] for y in (10, 40, 70)]
+        result = gen._split_columns_by_gutter(rows, cols)
+        assert result is not None
+        left_rows, right_rows, split_x = result
+        assert 70 < split_x < 200
+        assert all(len(r) == 4 for r in left_rows)
+        assert all(len(r) == 4 for r in right_rows)
+
+    def test_small_table_is_not_split(self):
+        gen = self._gen()
+        cols = [10, 60, 110, 160]
+        rows = [[self._cell(c, y) for c in cols] for y in (10, 40)]
+        assert gen._split_columns_by_gutter(rows, cols) is None
+
+    def test_low_quality_table_gets_warning_annotation(self):
+        gen = self._gen()
+        anchors = [10 + i * 60 for i in range(14)]
+        rows = []
+        for y in (10, 40, 70, 100):
+            row = [self._cell(a, y) for a in anchors]
+            row.append(self._cell(18, y))   # duplicate near col 0 -> collision
+            row.append(self._cell(78, y))   # duplicate near col 1 -> collision
+            rows.append(row)
+        md = gen._render_markdown_table(rows)
+        assert "[!warning]" in md
+        assert "\u589e\u5f3a\u8bc6\u522b" in md
+
+
 class TestLinkHelpers:
     """Test link helper functions."""
     

@@ -303,6 +303,19 @@ python -c "import io; print(io.open(r'D:\test-temp\ocr_output\99-Audit\OCR-Pendi
 - 【已修复｜错判页眉】弱词表新增 `演示`，修正 `121139` 的 `演示上具·`（OCR 错字“演示工具”）此前被兜底判为“页眉”，现正确判为“编辑器/导航栏按钮”。
 
 - 全量缓存回归（33 样例，改前 vs 改后严格 diff）：仅 4 张变化且均为正向——`121139`（演示上具 header→toolbar + 残片过滤）、`121150`（2 处残片过滤）、`121211`、`121232`（各 1 处残片过滤）。残片从正文移入过滤审核区，正文更干净；其余 29 张零变化。`pytest tests/ -q` = 30 passed（新增 4 项噪音识别测试）。
+## 7.14 本轮修复（2026-07-05 迭代十五）：P3 宽矩阵/并排表——方案 B 天沟拆分 + 表格质量门控
+
+按用户批准的“方案 B 先行、方案 A 兜底”方向，修复 P3（宽矩阵 / 并排表格被拼成错乱大网格）。本轮只做方案 B（几何法），改动仅在 `processors/markdown_generator.py` 与 `tests/test_pipeline.py`；方案 A（PP-Structure 增强，需下载模型权重 + 联网）尚未启动，留待质量分低于阈值时触发。
+
+- 【新增｜天沟拆分】`_split_columns_by_gutter(rows, columns)`：仅当列数 ≥ 8、最大列间距 ≥ 1.8×中位列间距、且拆分后两侧各保留 ≥ 2 列时，在最宽“天沟”处把一组行拆成左右两张独立表格，分别渲染。小表（4-6 列）一律不拆，避免把单张真实表格打碎。
+- 【新增｜表格质量分】`_table_quality(rows, columns)` 返回各分量 + 综合 `score`∈[0,1]，全部来自 bbox 几何信号（无需模型）：`fill`（填充率）、`align`（单元格中心对齐度）、`stab`（每行列数一致性）、`collision`（同列碰撞行占比，强烈提示并排表混排）、`col_penalty`（列数超过 `_WIDE_TABLE_COLS=9` 的惩罚）。综合式：`0.30*fill + 0.30*align + 0.20*stab + 0.20*(1-collision) - 0.35*col_penalty`，裁剪到 [0,1]。
+- 【新增｜低置信门控】`_render_markdown_table` 重构为方案 B 流水线：先剥离旁注 → 尝试天沟拆分（对左右两侧递归渲染）→ 否则走 `_render_single_table` 并打分；`score < _TABLE_QUALITY_MIN=0.62` 时在表格前追加告警注记（`> [!warning] 表格结构复杂……建议启用增强识别（PP-Structure）或人工核对原图`）。此告警即方案 A 的精准触发闸门。
+- 【重构】抽出 `_render_single_table(rows, columns)`（原“吸附到列锚点”的渲染逻辑，不含打分），供拆分/单表两路复用。
+
+- 全量缓存回归（33 样例，改前 vs HEAD `1259535` 严格 diff）：质量分分布合理——正常表 0.8-1.0；最差矩阵 `121125`（18×18 相关系数矩阵，0.51/0.43）与 `121238` 内一表（0.46）被正确标记。天沟拆分（列数下限 4→8 收紧后）仅在 `121125` 触发并改善正文；`121238` 仅新增告警注记；其余 31 张正文字节不变。
+- 【已知限制｜方案 A territory】`121134` 底部 8 列表实为并排合并表（加权敏感度表 + CSR WEIGHT 表），列间距无明显天沟，几何法无法拆分，且质量分 0.85（高于阈值）不触发告警——这正是方案 A（PP-Structure）后续要处理的场景。不下调阈值去硬抓它（会误标大量 0.77-0.85 的正常表）。
+- `pytest tests/ -q` = 35 passed（新增 `TestTableQuality` 5 项：清晰网格高分、宽矩阵低分、天沟拆分并排表、小表不拆、低质量表追加告警）。
+
 ## 8. Git
 
 远端：`https://github.com/popyun/knowledgeImportHub`，分支 `main`，最新已推送提交 `0201c92`（Filter image noise, extract page number, split stacked tables and side notes）。
