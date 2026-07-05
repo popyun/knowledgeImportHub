@@ -586,6 +586,54 @@ class TestGridBoost:
         assert isinstance(enh._get_backend(), VisionLocalBackend)
 
 
+class TestVisionLocalBackend:
+    """Local VLM (ollama) backend: HTML extraction + graceful degradation."""
+
+    def _crop(self):
+        import numpy as np
+        return np.full((40, 80, 3), 255, dtype=np.uint8)
+
+    def test_extract_table_html_from_reply(self):
+        from processors.table_enhancer import VisionLocalBackend
+        reply = "sure:\n```html\n<table><tr><td>a</td></tr></table>\n``` done"
+        html = VisionLocalBackend._extract_table_html(reply)
+        assert html == "<table><tr><td>a</td></tr></table>"
+        assert VisionLocalBackend._extract_table_html("no table here") is None
+        assert VisionLocalBackend._extract_table_html("") is None
+
+    def test_run_parses_ollama_table(self):
+        from processors.table_enhancer import VisionLocalBackend
+        be = VisionLocalBackend({"ocr": {"table_structure": {"vision_model": "m"}}})
+        with patch("requests.post") as post:
+            post.return_value.status_code = 200
+            post.return_value.json.return_value = {
+                "response": "<table><tr><td>x</td><td>y</td></tr></table>"
+            }
+            html = be.run(self._crop(), {"bbox": [0, 0, 80, 40]}, [], (0, 0))
+        assert html == "<table><tr><td>x</td><td>y</td></tr></table>"
+
+    def test_run_degrades_on_error(self):
+        from processors.table_enhancer import VisionLocalBackend
+        be = VisionLocalBackend({})
+        with patch("requests.post", side_effect=Exception("no server")):
+            assert be.run(self._crop(), {}, [], (0, 0)) is None
+
+    def test_run_degrades_on_non_200(self):
+        from processors.table_enhancer import VisionLocalBackend
+        be = VisionLocalBackend({})
+        with patch("requests.post") as post:
+            post.return_value.status_code = 500
+            assert be.run(self._crop(), {}, [], (0, 0)) is None
+
+    def test_run_degrades_when_no_table_in_reply(self):
+        from processors.table_enhancer import VisionLocalBackend
+        be = VisionLocalBackend({})
+        with patch("requests.post") as post:
+            post.return_value.status_code = 200
+            post.return_value.json.return_value = {"response": "I cannot read it"}
+            assert be.run(self._crop(), {}, [], (0, 0)) is None
+
+
 class TestLinkHelpers:
     """Test link helper functions."""
     

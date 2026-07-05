@@ -21,7 +21,9 @@ Design constraints (verified on the colored-slide corpus):
     position are unchanged, so enabling plan A can only add information.
 """
 
+import base64
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("ocr_pipeline")
@@ -258,19 +260,101 @@ class GridBoostBackend(_PPStructureBackendBase):
 class VisionLocalBackend:
     """Offline local vision model backend (vision tier).
 
-    Placeholder for high-capability hosts: on the current CPU-only host this
-    tier is never selected. run() returns None (graceful no-op) until a local
-    VLM integration is wired in, so selecting this backend degrades safely.
+    Sends the cropped low-confidence region to a locally hosted vision model
+    (via the ollama HTTP API, e.g. ``qwen2.5vl:3b``) and asks it to transcribe
+    the region as a single HTML ``<table>``. Used only on hosts the profiler
+    tags as vision-capable. If the model / server is unavailable or the reply
+    is not a usable table, run() returns None so the enhancer degrades safely
+    (plan B main output is untouched; enabling this can only add information).
     """
 
     name = "vision_local"
 
+    # Ask the model for HTML only so downstream _html_table_to_markdown can
+    # consume it exactly like the PP-Structure backends.
+    _PROMPT = (
+        "You are an OCR table transcriber. The image is a cropped region from a "
+        "Chinese financial slide that contains ONE table (it may be borderless "
+        "or colored). Transcribe it faithfully into a single HTML <table>.\n"
+        "Rules:\n"
+        "- Output ONLY the HTML <table>...</table>. No prose, no markdown, no code fences.\n"
+        "- Preserve the original row/column layout; one <tr> per visual row, "
+        "one <td> per cell. Keep empty cells as <td></td>.\n"
+        "- Keep numbers, Chinese text and symbols exactly as shown; do not "
+        "translate, summarize, reorder, or invent cells.\n"
+        "- Do not merge separate columns into one cell."
+    )
+
     def __init__(self, config=None):
         self.config = config or {}
+        ocr_cfg = (self.config.get("ocr", {}) or {})
+        ollama_cfg = (ocr_cfg.get("ollama", {}) or {})
+        ts_cfg = (ocr_cfg.get("table_structure", {}) or {})
+        self.endpoint = ollama_cfg.get("endpoint", "http://localhost:11434")
+        # vision_model may live under table_structure (backend-specific) or
+        # ollama; fall back to the common local VLM tag.
+        self.model = (
+            ts_cfg.get("vision_model")
+            or ollama_cfg.get("vision_model")
+            or "qwen2.5vl:3b"
+        )
+        self.timeout = int(ts_cfg.get("vision_timeout", 180))
+
+    def _encode_png(self, crop):
+        """Return base64 PNG of the BGR crop, or None on failure."""
+        try:
+            import cv2
+            ok, buf = cv2.imencode(".png", crop)
+            if not ok:
+                return None
+            return base64.b64encode(buf.tobytes()).decode("ascii")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("vision_local: failed to encode crop (%s)", exc)
+            return None
+
+    @staticmethod
+    def _extract_table_html(text):
+        """Pull the first <table>...</table> out of a model reply."""
+        if not text:
+            return None
+        # Strip code fences if the model wrapped the answer.
+        text = text.replace("```html", "").replace("```", "")
+        m = re.search(r"<table.*?</table>", text, re.IGNORECASE | re.DOTALL)
+        return m.group(0) if m else None
 
     def run(self, crop, region, region_blocks, offset_xy):
-        logger.info("vision_local backend not implemented on this host; skipping")
-        return None
+        img_b64 = self._encode_png(crop)
+        if img_b64 is None:
+            return None
+        try:
+            import requests
+            resp = requests.post(
+                self.endpoint.rstrip("/") + "/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": self._PROMPT,
+                    "images": [img_b64],
+                    "stream": False,
+                    "options": {"temperature": 0.0, "num_predict": 2048},
+                },
+                timeout=self.timeout,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("vision_local: ollama request failed (%s); skipping", exc)
+            return None
+        if resp.status_code != 200:
+            logger.warning("vision_local: ollama status %s; skipping", resp.status_code)
+            return None
+        try:
+            reply = resp.json().get("response", "") or ""
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("vision_local: bad ollama JSON (%s); skipping", exc)
+            return None
+        html = self._extract_table_html(reply)
+        if not html:
+            logger.info("vision_local: no <table> in model reply; skipping")
+            return None
+        return html
 
 
 # --------------------------------------------------------------------------- #

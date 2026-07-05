@@ -341,8 +341,27 @@ python -c "import io; print(io.open(r'D:\test-temp\ocr_output\99-Audit\OCR-Pendi
 - 【关键调研结论】本套彩色幻灯片语料上 gridboost/PP-Structure 仍不能稳定优于方案 B（如 `121134` 并排合并表 gridboost `S_e=0.845 < baseline 0.886`；`121125` 矩阵、`121238` 宽块更差），故维持“纯附加、review-only、默认关闭”。`vision` 档面向后续更强机器，本机（i5-11300H、CPU-only、16GB/空闲约 4-5GB、Intel Iris Xe）探测结论恒为 `gridboost`。
 - 【回归验证】`enhance_on_low_quality: false` 默认关闭；`markdown_generator.py` 相较 HEAD 零改动，全 33 张缓存语料重渲染逐字节等价、无 `\ufffd`。`pytest tests/ -q` = **54 passed**（新增 `TestHostProfiler` 6 项 + `TestGridBoost` 6 项：三档判定、缓存复用不重扫、非视觉主机不探测 ollama、`--rescan` 重建、gridboost 预处理形状、`enhanced_quality` 打分、tier→后端选择、config 覆盖优先）。
 
+## 7.17 本轮开发（2026-07-05 迭代十八）：方案 A vision 档落地——本地视觉模型 qwen2.5vl:3b 接入（按需触发、零负面影响）
+
+按用户批准"方案 A、拉 qwen2.5vl:3b 试"落地 vision 档。改动文件：`processors/table_enhancer.py`（实现 VisionLocalBackend）、`config.yaml`（新增 vision_model/vision_timeout）、`tests/test_pipeline.py`（新增 TestVisionLocalBackend 5 项）。
+
+- 【环境】`ollama pull qwen2.5vl:3b` 已完成（3.2GB，本地 `ollama list` 可见）。尾段网速被限速到 ~10KB/s 长时间卡在 99%，重启 pull 进程换新连接后立即 success。ollama 0.30.8 服务常驻，`/api/generate` 走 `images` 字段传 base64 PNG 即可视觉推理。
+- 【实现｜VisionLocalBackend】`processors/table_enhancer.py` 顶部加 `import base64, re`。`VisionLocalBackend.__init__` 从 `config.ocr.table_structure.vision_model`（其次 `ocr.ollama.vision_model`，默认 `qwen2.5vl:3b`）取模型、`vision_timeout`（默认 180s）取超时、`ocr.ollama.endpoint` 取地址。`run(crop, region, region_blocks, offset_xy)`：`cv2.imencode('.png')` → base64 → POST `/api/generate`（temperature=0、num_predict=2048、stream=False）→ `_extract_table_html` 用正则 `<table.*?</table>` 抠出表格 HTML。任何失败（编码失败/连接异常/非 200/JSON 坏/无 table）均 `return None` 安全降级，主输出不受影响。提示词要求"仅输出单个 HTML <table>、保留原行列、保留中文数字符号、不合并列"。
+- 【配置】`config.yaml` 的 `ocr.table_structure` 新增 `vision_model: "qwen2.5vl:3b"`、`vision_timeout: 180`。默认 `enhance_on_low_quality: false`、`backend: ""`（自动分档）保持不变。
+- 【分档现状】本机探测仍为 `gridboost`（空闲内存 4.49GB < `VISION_MIN_FREE_GB=8.0`，无 GPU）。测试通过 `config.ocr.table_structure.backend="vision"` 显式覆盖强制走 vision 档验证。host_profiler 的 `vision_keys` 已含 `vl`，`qwen2.5vl:3b` 若被自动探测可正确识别为视觉模型。
+
+- 【效果实测｜3 张目标图，backend=vision + enhance 开启】
+  - `121125`（18×18 相关系数矩阵）：vision 档命中低置信区域，`S_b=0.431 → S_e=0.857`，比对档 `> [!tip] 增强识别结果` 附加块结构明显更整齐，正向提升明显。
+  - `121053`、`121134`：`enhanced_tables=0`——**未触发**。根因：方案 B 未把这两张的问题区判为"低置信表格"（121053 是多步骤流程图式图文混排、121134 底部并排合并表质量分 0.85 高于阈值），vision 后端只对"低置信表格区域"裁剪重识别，因此不覆盖这两类版式错乱场景。这与之前几何法/PP-Structure 的结论一致：需要在"区域判定/触发条件"层面扩展，才能让 vision 覆盖混排流程图。
+  - 速度：本机 CPU 跑 3B VLM 很慢，单区域约 40s~500s+，曾出现 300s 超时（已由 vision_timeout 兜底降级）。生产需更强机器或调大超时。
+
+- 【回归验证｜零负面影响】默认配置（`enhance_on_low_quality: false`）下，用 33 张缓存 OCR 结果重渲染 markdown，与 `_regbaseline`（HEAD 全量渲染基线）**逐字节等价：MATCH 33 / DIFF 0 / 无缺失**。vision 档纯附加、review-only，对现有线上输出零改动。
+- `pytest tests/ -q` = **59 passed**（新增 `TestVisionLocalBackend` 5 项：HTML 抠取、ollama 表格解析、连接异常降级、非 200 降级、无 table 降级；全部 mock `requests.post`，不依赖真实模型）。
+
+- 【结论与后续】vision 档对"表格型低置信区"（如 121125）确有正向提升，已按用户"先上 A 看效果"落地并验证零回归。但对 121053/121134 这类"版式错乱但不被判为低置信表格"的场景，vision 后端当前不触发；若要覆盖，需扩展触发判定（把复杂混排/低置信整区也纳入 vision 重识别），属下一步可选增强，待用户确认方向。默认仍关闭增强，保证对现有质量零负面影响。
+
 ## 8. Git
 
-远端：`https://github.com/popyun/knowledgeImportHub`，分支 `main`，最新已推送提交 `0201c92`（Filter image noise, extract page number, split stacked tables and side notes）。
+远端：`https://github.com/popyun/knowledgeImportHub`，分支 `main`。方案 A vision 档（本地 qwen2.5vl:3b 接入）本轮改动待提交推送：`processors/table_enhancer.py`、`config.yaml`、`tests/test_pipeline.py`、`TASK_STATUS.md`。
 
-工作区干净，本地 `main` 与 `origin/main` 一致，无未提交改动。上述区域/表格/噪音过滤/页号/标题的全部修复均已并入 `0201c92`。
+默认增强关闭，全 33 张缓存回归逐字节等价、`pytest tests/ -q` = 59 passed。vision 档为纯附加 review-only，对现有线上输出零负面影响。

@@ -40,6 +40,11 @@ ocr:
     # Backend override for the enhancement tier. Empty => auto-select from
     # host_profile.local.json (vision | gridboost | manual | ppstructure).
     backend: ""
+    # Local vision-model backend (vision tier) settings. Used only when the
+    # host profile selects the "vision" tier (or backend is forced to
+    # "vision"/"vision_local"). Runs offline via the local ollama server.
+    vision_model: "qwen2.5vl:3b"
+    vision_timeout: 180
     crop_pad: 14
     max_enhance_regions: 4
     # Reserved for a future adopt gate; review-only comparison this round.
