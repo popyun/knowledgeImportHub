@@ -329,6 +329,18 @@ python -c "import io; print(io.open(r'D:\test-temp\ocr_output\99-Audit\OCR-Pendi
 - `pytest tests/ -q` = 42 passed（新增 `TestTableEnhancer` 7 项：默认关闭、配置开关、`_first_table_html` 提取、低置信区域记录、匹配区域附加增强块、不匹配区域不附加、`_bbox_iou`）。
 - 【后续可选】若要让方案 A 真正“增强”而非“比对”，需更强的表格模型或对彩色表做去底色/网格线增强预处理；当前语料下 PP-Structure 未达该标准，故保持 review-only + 默认关闭。
 
+## 7.16 本轮开发（2026-07-05 迭代十七）：方案 A 升级——三档自动降级 + 首启能力探测缓存 + 可插拔增强后端
+
+按用户批准的三档方案落地。改动文件：新增 `processors/host_profiler.py`；重写 `processors/table_enhancer.py`；改 `processors/image_handler.py`、`config.yaml`、`.gitignore`、`tests/test_pipeline.py`。
+
+- 【新增｜host_profiler】`processors/host_profiler.py`：首启探测 CPU 核数、总/空闲内存（psutil）、加速器（torch CUDA/MPS）、关键库（paddleocr/torch）；结果写入 `host_profile.local.json`（`.gitignore` 已加 `*.local.json` + 显式 `host_profile.local.json`，不入库），命中缓存即复用、不再扫描；`load_or_create_profile(base_dir, force_rescan=)` 支持 `--rescan` 重建。`ollama list` 会冷启动服务并阻塞，故 `ollama_vision_models` 默认延迟探测：仅当 `vision_capable`（有 CUDA/MPS 或空闲内存 ≥ `VISION_MIN_FREE_GB=8.0`）时才在 `decide_tier` 内懒探测。
+- 【三档映射｜decide_tier】`vision`（有加速器/大内存且本地视觉模型可用）→ VisionLocalBackend；`gridboost`（CPU-only 但 PaddleOCR 可用，本机落此档）→ GridBoostBackend；`manual`（无 PaddleOCR/资源不足）→ 不增强、人工复核。若“具备视觉潜力但缺软件/模型”→ 记 `missing_vision_requirements`，降级到 gridboost 并提示安装。
+- 【重写｜table_enhancer】抽出可插拔后端：`PPStructureBackend`（原始裁剪直跑）、`GridBoostBackend`（`gridboost_preprocess`=去底色自适应二值化 `_binarize_decolor` + 依据 OCR 词框聚类 `_cluster_axis` 补虚拟网格线 `_draw_virtual_grid` 后再跑 PP-Structure）、`VisionLocalBackend`（占位，本机 `run()`→None 安全降级）。`TableEnhancer(config, tier=)` 解析顺序：`config.ocr.table_structure.backend` 显式覆盖 > 传入 tier > 默认 gridboost；`manual` 档直接返回 `[]`。新增可比质量分 `enhanced_quality`（`score=0.45*fill+0.35*stab+0.20*size_bonus`），产出 `{html, region, engine, backend, score_enhanced, score_base, verdict="compare"}`。
+- 【接入｜image_handler】`__init__` 调 `load_or_create_profile()` 取 tier 建 `TableEnhancer(config, tier=tier)`，并记录档位与原因日志；`_maybe_prompt_vision_install` 在“有潜力但缺环境”且交互式 TTY 时询问是否安装（非交互/CI 只记日志不阻塞）。Step 5b 调 `enhance_regions(enhanced_image, regions, blocks=corrected_result["blocks"])`——补传 blocks 供 gridboost 画虚拟网格线。
+- 【比对闸门】本轮统一停在“比对档”：`verdict` 恒为 `compare`，增强结果仍以 review-only 附加块呈现，方案 B 主输出与位置不变，采纳档留待后续。
+- 【关键调研结论】本套彩色幻灯片语料上 gridboost/PP-Structure 仍不能稳定优于方案 B（如 `121134` 并排合并表 gridboost `S_e=0.845 < baseline 0.886`；`121125` 矩阵、`121238` 宽块更差），故维持“纯附加、review-only、默认关闭”。`vision` 档面向后续更强机器，本机（i5-11300H、CPU-only、16GB/空闲约 4-5GB、Intel Iris Xe）探测结论恒为 `gridboost`。
+- 【回归验证】`enhance_on_low_quality: false` 默认关闭；`markdown_generator.py` 相较 HEAD 零改动，全 33 张缓存语料重渲染逐字节等价、无 `\ufffd`。`pytest tests/ -q` = **54 passed**（新增 `TestHostProfiler` 6 项 + `TestGridBoost` 6 项：三档判定、缓存复用不重扫、非视觉主机不探测 ollama、`--rescan` 重建、gridboost 预处理形状、`enhanced_quality` 打分、tier→后端选择、config 覆盖优先）。
+
 ## 8. Git
 
 远端：`https://github.com/popyun/knowledgeImportHub`，分支 `main`，最新已推送提交 `0201c92`（Filter image noise, extract page number, split stacked tables and side notes）。

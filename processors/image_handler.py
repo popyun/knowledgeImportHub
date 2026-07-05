@@ -16,6 +16,7 @@ from .post_corrector import PostCorrector
 from .table_builder import TableBuilder
 from .markdown_generator import MarkdownGenerator
 from .table_enhancer import TableEnhancer
+from .host_profiler import load_or_create_profile, missing_vision_requirements
 from utils.file_utils import get_temp_file
 
 class ImageHandler(BaseHandler):
@@ -38,7 +39,18 @@ class ImageHandler(BaseHandler):
         self.post_corrector = PostCorrector(config)
         self.table_builder = TableBuilder(config)
         self.markdown_generator = MarkdownGenerator(config)
-        self.table_enhancer = TableEnhancer(config)
+        # Plan A tiered enhancement: detect host capability once (cached),
+        # map to an enhancement tier, and build the matching backend.
+        self.host_profile = load_or_create_profile(base_dir=".")
+        tier = self.host_profile.get("tier")
+        self._maybe_prompt_vision_install(self.host_profile)
+        self.table_enhancer = TableEnhancer(config, tier=tier)
+        self.logger.info(
+            "Enhancement tier=%s (%s); plan A %s",
+            self.table_enhancer.tier,
+            self.host_profile.get("reason", ""),
+            "ON" if self.table_enhancer.enabled else "OFF",
+        )
     
     def initialize(self) -> bool:
         """Initialize all processors."""
@@ -129,7 +141,9 @@ class ImageHandler(BaseHandler):
                 regions = list(self.markdown_generator._low_quality_regions)
                 if regions:
                     self.logger.debug("Step 5b: enhancing %d low-confidence region(s)", len(regions))
-                    enhanced_tables = self.table_enhancer.enhance_regions(enhanced_image, regions)
+                    enhanced_tables = self.table_enhancer.enhance_regions(
+                        enhanced_image, regions, blocks=corrected_result.get("blocks", [])
+                    )
                     if enhanced_tables:
                         corrected_result["enhanced_tables"] = enhanced_tables
                         markdown = self.markdown_generator.process(
@@ -159,6 +173,46 @@ class ImageHandler(BaseHandler):
         
         return result
     
+    def _maybe_prompt_vision_install(self, profile):
+        """If the host has vision-model potential but is missing software/
+        model weights, ask the user whether to install (interactive only).
+
+        Non-interactive runs (batch/CI, no TTY) never block: they just log
+        the missing pieces and stay on the degraded tier that the profiler
+        already selected. This method never changes the tier by itself; it
+        only surfaces an install hint.
+        """
+        try:
+            if not profile.get("vision_potential"):
+                return
+            missing = profile.get("missing_vision_requirements") or []
+            if not missing:
+                return
+            hint = (
+                "Host can run an offline vision model but is missing: "
+                + "; ".join(missing)
+                + ". Install e.g. `ollama pull qwen2.5vl` (several GB) to enable "
+                + "the 'vision' enhancement tier."
+            )
+            import sys
+            interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
+            if not interactive:
+                self.logger.info("%s (non-interactive: staying on '%s' tier)",
+                                 hint, profile.get("tier"))
+                return
+            self.logger.info(hint)
+            try:
+                answer = input(hint + " Install now? [y/N]: ").strip().lower()
+            except (EOFError, OSError):
+                return
+            if answer in ("y", "yes"):
+                self.logger.info(
+                    "Run the install command above, then re-run with --rescan "
+                    "to pick up the 'vision' tier."
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("vision install prompt skipped: %s", exc)
+
     def _infer_table_regions(
         self,
         blocks: List[Dict[str, Any]],

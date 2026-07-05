@@ -32,3 +32,6 @@ Thumbs.db
 .env.*
 *.local.yaml
 *.local.yml
+*.local.json
+# host capability cache (plan A tiered enhancement)
+host_profile.local.json

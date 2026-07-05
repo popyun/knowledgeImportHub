@@ -464,6 +464,128 @@ class TestTableEnhancer:
         assert 0.0 < MarkdownGenerator._bbox_iou([0, 0, 10, 10], [5, 5, 15, 15]) < 1.0
 
 
+class TestHostProfiler:
+    """Plan-A host capability profiler: tier decisions + cache reuse."""
+
+    def _caps(self, **over):
+        caps = {
+            "cpu_count": 8,
+            "total_memory_gb": 16.0,
+            "free_memory_gb": 4.0,
+            "gpu": {"cuda": False, "mps": False, "kind": "none"},
+            "has_paddleocr": True,
+            "has_torch": True,
+            "ollama_vision_models": None,
+        }
+        caps.update(over)
+        return caps
+
+    def test_tier_vision_when_gpu_and_model(self):
+        from processors import host_profiler as hp
+        caps = self._caps(gpu={"cuda": True, "mps": False, "kind": "cuda"})
+        with patch.object(hp, "_detect_ollama_vision_models", return_value=["qwen2.5vl"]):
+            d = hp.decide_tier(caps)
+        assert d["tier"] == hp.TIER_VISION
+        assert d["missing"] == []
+
+    def test_tier_gridboost_vision_capable_but_missing_model(self):
+        from processors import host_profiler as hp
+        # Big free RAM => vision potential, but no local vision model installed.
+        caps = self._caps(free_memory_gb=32.0)
+        with patch.object(hp, "_detect_ollama_vision_models", return_value=[]):
+            d = hp.decide_tier(caps)
+        assert d["tier"] == hp.TIER_GRIDBOOST
+        assert d["vision_potential"] is True
+        assert d["missing"]  # non-empty => should prompt to install
+
+    def test_tier_gridboost_cpu_only(self):
+        from processors import host_profiler as hp
+        # CPU-only, low RAM, PaddleOCR available => gridboost, ollama not probed.
+        with patch.object(hp, "_detect_ollama_vision_models") as probe:
+            d = hp.decide_tier(self._caps())
+            probe.assert_not_called()  # deferred probe skipped for non-vision hosts
+        assert d["tier"] == hp.TIER_GRIDBOOST
+        assert d["vision_potential"] is False
+
+    def test_tier_manual_without_paddleocr(self):
+        from processors import host_profiler as hp
+        d = hp.decide_tier(self._caps(has_paddleocr=False))
+        assert d["tier"] == hp.TIER_MANUAL
+
+    def test_cache_reuse_skips_rescan(self, tmp_path):
+        from processors import host_profiler as hp
+        base = str(tmp_path)
+        p1 = hp.load_or_create_profile(base_dir=base)
+        assert (tmp_path / hp.PROFILE_FILENAME).exists()
+        # Second call must NOT re-detect capabilities (cache hit).
+        with patch.object(hp, "detect_capabilities") as det:
+            p2 = hp.load_or_create_profile(base_dir=base)
+            det.assert_not_called()
+        assert p2["tier"] == p1["tier"]
+
+    def test_force_rescan_rebuilds(self, tmp_path):
+        from processors import host_profiler as hp
+        base = str(tmp_path)
+        hp.load_or_create_profile(base_dir=base)
+        with patch.object(hp, "detect_capabilities", wraps=hp.detect_capabilities) as det:
+            hp.load_or_create_profile(base_dir=base, force_rescan=True)
+            det.assert_called()
+
+
+class TestGridBoost:
+    """gridboost preprocessing + S_e scoring + tier->backend selection."""
+
+    def test_gridboost_preprocess_shape(self):
+        import numpy as np
+        from processors.table_enhancer import gridboost_preprocess
+        crop = np.full((60, 120, 3), 200, dtype=np.uint8)
+        blocks = [
+            {"type": "text", "bbox": [[10, 10], [40, 10], [40, 25], [10, 25]]},
+            {"type": "text", "bbox": [[70, 10], [100, 10], [100, 25], [70, 25]]},
+            {"type": "text", "bbox": [[10, 40], [40, 40], [40, 55], [10, 55]]},
+        ]
+        out = gridboost_preprocess(crop, blocks, (0, 0))
+        assert out.shape == crop.shape  # BGR, same size
+        assert out.dtype == np.uint8
+
+    def test_enhanced_quality_scoring(self):
+        from processors.table_enhancer import enhanced_quality
+        html = ("<table><tr><td>a</td><td>b</td></tr>"
+                "<tr><td>1</td><td>2</td></tr></table>")
+        q = enhanced_quality(html)
+        assert q["n_rows"] == 2 and q["n_cols"] == 2
+        assert 0.0 < q["score"] <= 1.0
+        assert enhanced_quality("")["score"] == 0.0
+
+    def test_tier_selects_gridboost_backend(self):
+        from processors.table_enhancer import TableEnhancer, GridBoostBackend
+        enh = TableEnhancer({}, tier="gridboost")
+        assert isinstance(enh._get_backend(), GridBoostBackend)
+
+    def test_tier_selects_vision_backend(self):
+        from processors.table_enhancer import TableEnhancer, VisionLocalBackend
+        enh = TableEnhancer({}, tier="vision")
+        assert isinstance(enh._get_backend(), VisionLocalBackend)
+
+    def test_manual_tier_no_backend_no_enhance(self):
+        from processors.table_enhancer import TableEnhancer
+        enh = TableEnhancer(
+            {"ocr": {"table_structure": {"enhance_on_low_quality": True}}},
+            tier="manual",
+        )
+        assert enh._get_backend() is None
+        assert enh.enhance_regions(object(), [{"bbox": [0, 0, 10, 10]}]) == []
+
+    def test_config_backend_override_beats_tier(self):
+        from processors.table_enhancer import TableEnhancer, VisionLocalBackend
+        enh = TableEnhancer(
+            {"ocr": {"table_structure": {"backend": "vision"}}},
+            tier="gridboost",
+        )
+        assert enh.tier == "vision"
+        assert isinstance(enh._get_backend(), VisionLocalBackend)
+
+
 class TestLinkHelpers:
     """Test link helper functions."""
     
