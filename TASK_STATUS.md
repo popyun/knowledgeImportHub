@@ -270,6 +270,18 @@ python -c "import io; print(io.open(r'D:\test-temp\ocr_output\99-Audit\OCR-Pendi
 - `_generate_review_note` 按 `meta['summary_mode']` 输出差异化待确认文案：`condensed` 标注“语义压缩、可能损失部分语义”；`tolerated` 标注“略超上限但在 30% 内、为保留语义完整未截断”；其余为通用摘要说明。仅 `source=='summary'` 时才产生 `> [!todo] 待确认事项` 区块。
 
 - 验证：构造样例 A(16字)=complete、B(36字,超20%)=tolerated 完整保留、C(56字,超87%)=condensed 压到28字，均符合预期。全量缓存回归 33 样例：32 个 heading 标题不变，仅 `121236` 走 `summary/condensed`（28 字 + 待确认区块），无回归。`pytest tests/ -q` = 22 passed（新增三档模式测试）。
+## 7.11 本轮修复（2026-07-05 迭代十二）：P1 表格底行误过滤 + 页号误取
+
+修复 7.7 记录的两个 P1。改动仅在 `processors/markdown_generator.py`。
+
+- 【P1 已修复｜表格底部行落入页脚被误过滤】`_is_margin_noise` 新增数字豁免：纯数字/百分比/金额/分隔符型短文本（正则 `[\d.,%+\-/~():：·¥$€]+`）一律不判页脚，返回内容。`121150` 底部相关系数矩阵最后几行（76.3%/88.7%/56.6%/97.0%/100.0%/93.2%/40.0%）不再被当“页脚/版权信息”丢弃，完整进入表格。
+
+- 【P1 已修复｜页号误取】新增 `_page_number_candidates(all_blocks)` 统一判定页号，`_partition_blocks` 与 `_extract_page_number` 共用：
+  - 明确形式 `N/M` 与 `第N页` 在页边距内任意位置有效。
+  - 裸数字仅当“位于页脚/页眉边距 + 中心相对横坐标 relx>=0.75（靠右）+ 该边距内此类裸数字唯一”时才认定为页号；成串裸数字（表格期限/序号行，如 1/5/10）一律不当页号。
+  - `_partition_blocks` 的 page_number 标记改用该候选集的 id 集合，删除旧“in_margin 裸数字一律当页号”逻辑。
+
+- 全量缓存回归（33 样例，改前 vs 改后严格 diff）：仅 2 张变化且均为正向修复——`121150` page `1`→`None`、footer 过滤 10→0（矩阵数据回归、tblsep 31→32）；`121139` page `9`→`32`（此前误取左侧序号列末位 9，现正确取右下角 relx=0.98 的 32）。其余 31 张页号/过滤/表格指标零变化。`pytest tests/ -q` = 22 passed。
 ## 8. Git
 
 远端：`https://github.com/popyun/knowledgeImportHub`，分支 `main`，最新已推送提交 `0201c92`（Filter image noise, extract page number, split stacked tables and side notes）。

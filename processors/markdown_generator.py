@@ -378,6 +378,10 @@ ocr_confidence: {confidence:.2f}
         header_limit = page_top + page_height * 0.07
         footer_limit = page_bottom - page_height * 0.07
 
+        # Genuine page numbers (lone right-aligned footer digit or explicit
+        # N/M / 第N页); a ROW of bare digits in a bottom table is NOT included.
+        page_number_ids, _ordered = self._page_number_candidates(blocks)
+
         content: List[Dict[str, Any]] = []
         noise: List[Dict[str, Any]] = []
         for block in blocks:
@@ -389,10 +393,7 @@ ocr_confidence: {confidence:.2f}
             in_margin = metrics["max_y"] <= header_limit or metrics["min_y"] >= footer_limit
             kind = self._noise_kind(text, in_margin=in_margin)
             reason = None
-            compact_text = re.sub(r"\s+", "", text)
-            is_page_number = kind == "page_number" or (
-                in_margin and re.fullmatch(r"\d{1,4}", compact_text) is not None
-            )
+            is_page_number = id(block) in page_number_ids
             if is_page_number:
                 reason = "page_number"
             elif kind == "toolbar":
@@ -414,30 +415,104 @@ ocr_confidence: {confidence:.2f}
         return content, noise
 
     def _is_margin_noise(self, text: str, metrics: Dict[str, float], page_height: float) -> bool:
-        """Header/footer heuristic: short or boilerplate text in page margins."""
+        """Header/footer heuristic: short or boilerplate text in page margins.
+
+        Numeric/percent/currency short tokens are NOT treated as footer noise:
+        they are almost always table data (e.g. a correlation matrix whose last
+        rows fall into the bottom margin). Only genuinely short prose or an
+        explicit copyright/boilerplate term counts as header/footer.
+        """
         compact = re.sub(r"\s+", "", text)
-        if len(compact) <= 6:
-            return True
+        # Numbers, percentages, currency amounts and bare separators between them
+        # are table residue, not footer boilerplate. Keep them as content.
+        if re.fullmatch(r"[\d.,%+\-/~():：·¥$€]+", compact):
+            return False
         footer_terms = ("版权", "保留", "所有权利", "confidential", "版权所有", "有限公司", "咨询")
         lowered = compact.lower()
         if any(term.lower() in lowered for term in footer_terms):
             return True
+        if len(compact) <= 6:
+            return True
         return False
+
+    def _page_number_candidates(
+        self, all_blocks: List[Dict[str, Any]]
+    ) -> Tuple[Dict[int, str], List[Tuple[int, str]]]:
+        """Identify blocks that are genuine page numbers.
+
+        Returns ``(by_id, ordered)`` where ``by_id`` maps ``id(block)`` to the
+        page-number string, and ``ordered`` is the list of ``(id, value)`` in
+        priority order for extraction.
+
+        A page number is a footer/header token that is either an explicit
+        ``N/M`` or ``第N页`` form, or a lone bare digit that sits in the far
+        right of the footer margin and is NOT one of several bare digits (a row
+        of bare digits is table data such as tenor/index labels, not a page
+        number).
+        """
+        text_blocks = [
+            b for b in all_blocks
+            if b.get("type") == "text" and b.get("text", "").strip()
+        ]
+        if not text_blocks:
+            return {}, []
+        page_top = min(self._block_metrics(b)["min_y"] for b in text_blocks)
+        page_bottom = max(self._block_metrics(b)["max_y"] for b in text_blocks)
+        page_left = min(self._block_metrics(b)["min_x"] for b in text_blocks)
+        page_right = max(self._block_metrics(b)["max_x"] for b in text_blocks)
+        page_height = max(page_bottom - page_top, 1)
+        page_width = max(page_right - page_left, 1)
+        header_limit = page_top + page_height * 0.07
+        footer_limit = page_bottom - page_height * 0.07
+
+        by_id: Dict[int, str] = {}
+        explicit: List[Tuple[int, str]] = []
+        bare: List[Tuple[int, str]] = []
+        for block in text_blocks:
+            compact = re.sub(r"\s+", "", block.get("text", ""))
+            metrics = self._block_metrics(block)
+            in_margin = metrics["max_y"] <= header_limit or metrics["min_y"] >= footer_limit
+            # Explicit forms are unambiguous anywhere in the margins.
+            m = re.search(r"(\d+)\s*/\s*(\d+)", compact)
+            if m:
+                val = f"{m.group(1)}/{m.group(2)}"
+                by_id[id(block)] = val
+                explicit.append((id(block), val))
+                continue
+            m = re.fullmatch(r"第?(\d+)页", compact)
+            if m:
+                by_id[id(block)] = m.group(1)
+                explicit.append((id(block), m.group(1)))
+                continue
+            if in_margin and re.fullmatch(r"\d{1,4}", compact):
+                center_x = (metrics["min_x"] + metrics["max_x"]) / 2
+                rel_x = (center_x - page_left) / page_width
+                bare.append((id(block), compact, rel_x, metrics["min_y"] >= footer_limit))
+
+        # A lone bare digit near the right edge of the footer is a page number;
+        # several bare digits are table residue (tenor/index rows), so drop all.
+        right_bare = [item for item in bare if item[2] >= 0.75]
+        if len(right_bare) == 1:
+            bid, val, _rel, _foot = right_bare[0]
+            by_id[bid] = val
+            ordered = explicit + [(bid, val)]
+        else:
+            ordered = explicit
+        return by_id, ordered
 
     def _extract_page_number(
         self, noise_blocks: List[Dict[str, Any]], all_blocks: List[Dict[str, Any]]
     ) -> Optional[str]:
-        """Pull a page number from footer/header noise for sequential archiving."""
-        for block in noise_blocks:
-            text = re.sub(r"\s+", "", block.get("text", ""))
-            match = re.search(r"(\d+)\s*/\s*(\d+)", text)
-            if match:
-                return f"{match.group(1)}/{match.group(2)}"
-            match = re.fullmatch(r"第?(\d+)页", text)
-            if match:
-                return match.group(1)
-            if re.fullmatch(r"\d{1,4}", text):
-                return text
+        """Pull a page number from footer/header for sequential archiving.
+
+        Uses :meth:`_page_number_candidates` so a row of bare digits inside a
+        bottom-margin table (e.g. tenor labels 1/5/10) is never mistaken for a
+        page number; only an explicit ``N/M`` / ``第N页`` or a lone right-aligned
+        footer digit qualifies.
+        """
+        _by_id, ordered = self._page_number_candidates(all_blocks)
+        if ordered:
+            return ordered[0][1]
         return None
 
     _FILTER_REASON_LABELS = {
