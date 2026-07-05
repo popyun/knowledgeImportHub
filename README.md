@@ -1,20 +1,39 @@
 # Obsidian Knowledge Import Hub
 
-A production-ready OCR-to-Obsidian import system that automatically processes images containing tables, mixed languages, and special characters, publishing structured Markdown notes into an Obsidian vault.
+English | [ä¸­æ–‡](README.zh-CN.md)
+
+A production-ready OCR-to-Obsidian import system that automatically processes
+images containing tables, mixed languages, and special characters, publishing
+structured Markdown notes into an Obsidian vault.
 
 ## Features
 
-- **Automatic File Watching**: Monitors RAW folder for new images
-- **Multi-Engine OCR**: Routes to PaddleOCR, MinerU, or Mathpix based on content type
-- **Table Reconstruction**: Preserves cell colors and generates HTML tables with `bgcolor`
-- **LLM Post-Correction**: Uses local Ollama for OCR error correction
+- **Automatic File Watching**: Monitors the RAW folder for new images
+- **Multi-Engine OCR**: Routes to PaddleOCR / MinerU / Mathpix based on content type
+- **Layout-Aware Reconstruction**: Rebuilds titles, reading-order regions, and tables from OCR blocks
+- **Table Reconstruction**: Preserves cell colors and generates tables (Markdown and HTML with `bgcolor`)
+- **Noise Filtering**: Editor toolbars / PPT headers / footers are moved to a review block with reasons, not discarded
+- **LLM Post-Correction**: Uses a local Ollama model for OCR error correction
 - **Smart Linking**: Auto-generates wiki-links to existing Obsidian notes
 - **Persistent Queue**: SQLite-based task queue with resume capability
 - **Structured Logging**: JSON logs for debugging and monitoring
 
+## Requirements
+
+- Windows, Python 3.11
+- Pinned OCR stack (do not change; other versions cause ABI import errors):
+
+```text
+paddleocr==2.7.3
+paddlepaddle==2.6.2
+numpy==1.26.4
+opencv-python==4.6.0.66
+opencv-contrib-python==4.6.0.66
+```
+
 ## Installation
 
-### 1. Install Python Dependencies
+### 1. Install Python dependencies
 
 ```bash
 cd knowledge_import_hub
@@ -23,52 +42,38 @@ pip install -r requirements.txt
 
 ### 2. Install Ollama (for LLM correction)
 
-**Windows:**
 ```powershell
+# Windows
 winget install Ollama.Ollama
 ```
 
-**macOS:**
 ```bash
+# macOS
 brew install ollama
-```
 
-**Linux:**
-```bash
+# Linux
 curl -fsSL https://ollama.com/install.sh | sh
 ```
 
-### 3. Pull LLM Model
+### 3. Pull the LLM model
 
 ```bash
 ollama pull qwen2.5:1.5b
 ```
 
-### 4. Install Optional Dependencies
-
-**For super-resolution (Real-ESRGAN):**
-```bash
-pip install realesrgan
-```
-
-**For Chinese text processing:**
-```bash
-pip install jieba
-```
-
 ## Configuration
 
-Edit `config.yaml` to set up your environment:
+Edit `config.yaml`:
 
 ```yaml
 vault:
-  root: "D:/test-temp/ocr_output"  # Your Obsidian vault root
-  raw_folder: "00-RAW"              # Folder to watch for new images
-  audit_folder: "99-Audit/OCR-Pending"  # Where processed notes go
+  root: "D:/test-temp/ocr_output"        # Obsidian vault root
+  raw_folder: "00-RAW"                    # Folder watched for new images
+  audit_folder: "99-Audit/OCR-Pending"   # Where processed notes are published
 
 processing:
-  max_worker_threads: 2             # Parallel processing threads
-  confidence_threshold: 0.85        # Below this triggers LLM correction
+  max_worker_threads: 2                   # Parallel processing threads
+  confidence_threshold: 0.85              # Below this triggers LLM correction
 
 ocr:
   ollama:
@@ -78,30 +83,31 @@ ocr:
 
 ## Usage
 
-### Start the Watcher
+### Start the watcher
 
 ```bash
 python main.py
 ```
 
-This will:
-1. Start monitoring the RAW folder
-2. Process new images automatically
-3. Publish notes to the audit folder
+This monitors the RAW folder, processes new images, and publishes notes to the
+audit folder.
 
-### Process Specific Files
+### Process specific files
 
 ```bash
-python main.py --once D:/test-temp/png/image1.png D:/test-temp/png/image2.png
+python main.py --once "D:/test-temp/png/image1.jpg" "D:/test-temp/png/image2.jpg"
 ```
 
-### Check Queue Status
+> Note: on success `main.py --once` may still exit with code 1; trust the
+> `Published note` log line as the source of truth.
+
+### Check queue status
 
 ```bash
 python main.py --status
 ```
 
-### With Custom Config
+### Use a custom config
 
 ```bash
 python main.py --config /path/to/config.yaml
@@ -109,132 +115,126 @@ python main.py --config /path/to/config.yaml
 
 ## Testing
 
-### Run Test Suite
+### Unit tests
 
 ```bash
-cd knowledge_import_hub
-pytest tests/ -v
+pytest tests/ -q
 ```
 
-### Run Specific Tests
+### Snapshot testing (iteration archiving and comparison)
+
+`test_snapshot.py` archives each test run so results can be compared across
+iterations. This is the recommended way to verify layout changes.
 
 ```bash
-pytest tests/test_pipeline.py::TestTableBuilder -v
-pytest tests/test_pipeline.py::TestEntityLinker -v
+# Run OCR on samples, archive a timestamped snapshot, and auto-compare
+# against the previous one:
+python test_snapshot.py run
+
+# Reuse cached OCR blocks (skip slow OCR, layout-only iteration):
+python test_snapshot.py run --use-cache
+
+# Run on specific images only:
+python test_snapshot.py run --images "D:/test-temp/png/a.jpg" "D:/test-temp/png/b.jpg"
+
+# Compare the two most recent snapshots (no OCR):
+python test_snapshot.py compare
+
+# List archived snapshots:
+python test_snapshot.py list
 ```
 
-### End-to-End Test
-
-```bash
-# Create test vault structure
-mkdir -p D:/test-temp/ocr_output/{00-RAW,99-Audit/OCR-Pending,10-WIKI}
-
-# Copy test images
-cp D:/test-temp/png/*.png D:/test-temp/ocr_output/00-RAW/
-
-# Run processing
-python main.py --once D:/test-temp/ocr_output/00-RAW/*.png
-
-# Check output
-ls D:/test-temp/ocr_output/99-Audit/OCR-Pending/
-```
+Each snapshot stores per-image Markdown plus a `manifest.json` of metrics
+(chars, lines, table rows, external tables, OCR blocks, confidence). Comparison
+ignores the front-matter `date:` line and reports unchanged / changed / added /
+removed items with a unified diff for changed files. Snapshots default to
+`D:/test-temp/ocr_output/_snapshots` (outside the repository).
 
 ## Project Structure
 
-```
+```text
 knowledge_import_hub/
-©À©¤©¤ config.yaml              # Configuration
-©À©¤©¤ main.py                  # Entry point
-©À©¤©¤ watcher.py               # File system watcher
-©À©¤©¤ queue_manager.py         # SQLite task queue
-©À©¤©¤ processors/
-©¦   ©À©¤©¤ base.py              # Abstract base handler
-©¦   ©À©¤©¤ image_handler.py     # Pipeline orchestrator
-©¦   ©À©¤©¤ preprocessor.py      # Image enhancement
-©¦   ©À©¤©¤ color_extractor.py   # Table color extraction
-©¦   ©À©¤©¤ ocr_router.py        # OCR engine selection
-©¦   ©À©¤©¤ post_corrector.py    # LLM correction
-©¦   ©À©¤©¤ table_builder.py     # HTML table generation
-©¦   ©¸©¤©¤ markdown_generator.py # Markdown assembly
-©À©¤©¤ publishers/
-©¦   ©¸©¤©¤ obsidian_publisher.py # Note publishing
-©À©¤©¤ linkers/
-©¦   ©À©¤©¤ entity_linker.py     # Link candidate generation
-©¦   ©¸©¤©¤ disambiguator.py     # Link scoring
-©À©¤©¤ utils/
-©¦   ©À©¤©¤ file_utils.py        # File operations
-©¦   ©À©¤©¤ log_setup.py         # Logging setup
-©¦   ©¸©¤©¤ progress.py          # Progress tracking
-©À©¤©¤ tests/                   # Test suite
-©À©¤©¤ requirements.txt         # Dependencies
-©¸©¤©¤ README.md                # This file
+- config.yaml                 # Configuration
+- main.py                     # Entry point
+- watcher.py                  # File system watcher
+- queue_manager.py            # SQLite task queue
+- run_test.py                 # Setup checker (see test_snapshot.py for real runs)
+- test_snapshot.py            # Snapshot testing / iteration comparison
+- processors/
+  - base.py                   # Abstract base handler
+  - image_handler.py          # Pipeline orchestrator
+  - preprocessor.py           # Image enhancement (Unicode-safe image read)
+  - color_extractor.py        # Table color extraction
+  - ocr_router.py             # OCR engine selection (PaddleOCR + PP-Structure)
+  - post_corrector.py         # LLM correction
+  - table_builder.py          # Fallback HTML table generation
+  - markdown_generator.py     # Layout reconstruction and Markdown assembly
+- publishers/
+  - obsidian_publisher.py     # Note publishing
+- linkers/
+  - entity_linker.py          # Link candidate generation
+  - disambiguator.py          # Link scoring
+- utils/
+  - file_utils.py             # File operations
+  - log_setup.py              # Logging setup
+  - progress.py               # Progress tracking
+- tests/                      # Test suite
+- requirements.txt            # Dependencies
+- README.md                   # This file (English)
+- README.zh-CN.md             # Chinese version
 ```
+
 ## Workflow
 
-1. **Image Detection**: Watcher detects new image in RAW folder
-2. **Queue Addition**: Task added to SQLite queue with SHA-256 hash
-3. **Preprocessing**: Document detection, perspective correction, color extraction
-4. **Content Classification**: Determines if image contains tables, text, or mixed
-5. **OCR Processing**: Routes to appropriate engine (PaddleOCR/MinerU/Mathpix)
+1. **Image Detection**: watcher detects a new image in the RAW folder
+2. **Queue Addition**: task added to the SQLite queue with a SHA-256 hash
+3. **Preprocessing**: document detection, perspective correction, color extraction
+4. **Content Classification**: table / text / mixed
+5. **OCR Processing**: routes to the appropriate engine
 6. **Post-Correction**: LLM corrects low-confidence text
-7. **Table Building**: Reconstructs HTML tables with original colors
-8. **Markdown Generation**: Assembles note with YAML front matter
-9. **Entity Linking**: Generates wiki-link candidates
-10. **Publishing**: Writes note to audit folder for review
+7. **Layout & Tables**: reconstructs regions and tables (colors preserved)
+8. **Markdown Generation**: assembles a note with YAML front matter
+9. **Entity Linking**: generates wiki-link candidates
+10. **Publishing**: writes the note to the audit folder for review
 
 ## Output Format
-
-Generated notes include:
 
 ```yaml
 ---
 title: "Extracted Title"
 date: 2026-05-11
+page: 34
 tags: ["ocr/pending", "ocr/table"]
 status: pending
-source: "[[00-RAW/original.png]]"
+source: "[[00-RAW/original.jpg]]"
 ocr_confidence: 0.87
 ---
 
-Extracted text content...
+# Extracted Title
 
-## Tables
+Reconstructed body text and Markdown tables...
 
-<table border="1">
-<tr><td bgcolor="#FF0000">Cell 1</td><td bgcolor="#00FF00">Cell 2</td></tr>
-</table>
-
+<!-- Filtered non-content (nav bars / headers / footers) - review before archiving -->
 <!-- Link Candidates (for review) -->
-<!-- LINK: Machine Learning -> [[Machine Learning]] (conf: 0.95) -->
-<!-- LINK: AI -> [[AI]] (conf: 0.75) -->
 ```
 
 ## Troubleshooting
 
-### PaddleOCR Not Found
+### numpy / ABI import error
+
+Keep `numpy==1.26.4`. Other versions raise
+`numpy.core.multiarray failed to import`.
+
+### Non-ASCII (Chinese) image paths fail to read
+
+Fixed: `preprocessor.py` reads images via `np.fromfile` + `cv2.imdecode`
+instead of `cv2.imread`, which cannot open non-ASCII paths on Windows.
+
+### Ollama connection failed
 
 ```bash
-pip install paddleocr==2.7.0 paddlepaddle==2.5.0
-```
-
-### Ollama Connection Failed
-
-```bash
-# Check Ollama is running
-ollama list
-
-# Restart Ollama
-ollama serve
-```
-
-### Queue Stuck
-
-```bash
-# Check queue status
-python main.py --status
-
-# Reset queue (delete database)
-rm vault/.obsidian/ocr_queue.db
+ollama list      # check it is running
+ollama serve     # restart
 ```
 
 ## License
@@ -245,9 +245,5 @@ MIT License
 
 1. Fork the repository
 2. Create a feature branch
-3. Run tests: `pytest tests/ -v`
-4. Submit pull request
-
-## Support
-
-For issues and questions, please open a GitHub issue.
+3. Run tests: `pytest tests/ -q`
+4. Submit a pull request
