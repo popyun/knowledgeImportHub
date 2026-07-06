@@ -378,6 +378,17 @@ python -c "import io; print(io.open(r'D:\test-temp\ocr_output\99-Audit\OCR-Pendi
 - `PROJECT_SUMMARY.md`：整篇重写为当前架构文档（流水线 + 三档分档双架构图、模块清单、版面还原能力、方案 A 设计原则与"为何 review-only/整页重建被回滚"实测结论、配置要点、固定依赖、已知限制）。旧版停留在初始态（9 passed / v1.0.0 / 旧依赖 / 纯线性图）已废弃。
 - 一致性校验：文档引用模块文件均存在、`_TABLE_QUALITY_MIN=0.62`/config 项/模型名 `qwen2.5vl:3b` 与代码一致、三份文档零乱码（无 U+FFFD）。
 
+## 7.20 本轮开发（2026-07-06 迭代二十）：方向 3 落地——分区域 VLM 重建 + 逐 token 一致性判据 + 条件采纳
+
+承 7.18 教训（整页重建失败根因是缺可靠采纳判据，字数覆盖率拦不住篡改），本轮落地方向 3：仅对被判定版面错乱的页面，复用现有版面带切分把页面切成区域，逐区域喂本地 qwen2.5vl:3b 原分辨率裁剪块转 Markdown，拼接去重后用逐 token 一致性判据决定是否采纳替换正文。默认关闭，开启后仅错乱图走此路径，全程可回滚。
+
+- 【代码落点】新增 processors/region_rebuilder.py：RegionRebuilder（切分→裁剪→逐区 VLM→拼接去重→判据→裁决）；工具函数 consistency_metrics（多重集比对数字 token、算 hit/fabricate）、stitch_regions（行级近似去重）、markdown_struct_score（解析 Markdown 管道表的 fill/列稳定/尺寸得分）。
+- 【接线】image_handler.py 新增 Step 5c（region_rebuilder.enabled 且 needs_region_rebuild 命中才调），verdict 持久化到 corrected_result[region_rebuild] 后重渲染；markdown_generator.process 读 verdict，采纳则替换 body（加 [!note] 来源标注）、否则附 [!tip] 比对块 + 未过原因；config 新增 region_rebuild:false 等键。
+- 【缺陷修复】初版 _judge 把 Markdown 传给只能解析 HTML 的 enhanced_quality，struct 恒为 0、永远无法采纳；改用新增的 markdown_struct_score。又修复裁剪过大导致 ollama HTTP 400：超分图区域裁剪最宽达 ~3400px，超出 VLM 视觉 token 预算；新增 _MAX_CROP_SIDE=1400 降采样。
+- 【真实模型抽样】121134 开 adopt 实跑（2 区域，耗时 779s）：verdict adopt=False，hit=0.157、fabricate=0.056、struct=0.544（n_ocr=108, n_vlm=18）。判据正确拒绝（小模型在 1400px 裁剪下仍大量漏内容），回退到 review-only 比对块，正文保持方案 B 不变、零伤害。矶颈仍是 3B 小模型本身（同 7.18 结论）。
+- 【回归】region_rebuild:false 默认关闭时，全 33 张缓存语料重渲染与 _regbaseline 逐字节等价（忽略 date 行）MATCH 33 / DIFF 0；pytest tests/ -q = 76 passed（新增 17 项分区域重建单测，tests/test_region_rebuild.py）。
+- 【触发现状】needs_region_rebuild 保守（低置信区域≥ 1 或 多区域但无表格散块）。实测 121134/121053/121150 当前 trigger=False（它们的并排宽表在方案 B 看来质量分高、不判低置信，即 7.9 遗留问题）。结论：框架已就绪且零回归，待更强模型（方向 1 换 7B 或 Mac 本地更强开源）时可直接启用。
+
 ## 9. 当前未决任务清单（截至 2026-07-06）
 
 已闭环（早期记录的问题均已在后续迭代修复，见对应小节）：
@@ -389,11 +400,12 @@ python -c "import io; print(io.open(r'D:\test-temp\ocr_output\99-Audit\OCR-Pendi
 3. 【大数值矩阵识别】`121125`（18×18 相关系数矩阵）等超大数值网格：OCR bbox 精度极限，数字粘连、列错位。vision 档对其低置信区有正向提升（`S_b 0.43 → S_e 0.86`）但仅 review-only 呈现；彻底结构化需更强表格模型或人工复核。
 
 待办（非缺陷）：
-- 本轮文档改动（`README.md`/`README.zh-CN.md`/`PROJECT_SUMMARY.md`）尚未提交推送；见第 8 节。
+- 方向 3 已落地但默认关闭；本机 3B 模型无法通过采纳闸门（121134 hit=0.16），待更强模型（方向 1 换 7B / Mac 本地）后重新验证采纳效果。
+- needs_region_rebuild 当前未命中 121134/121053/121150（并排宽表被方案 B 判高质量）；若未来采纳可靠，需为这类图补“语义级宽表”触发信号。
 
 
 ## 8. Git
 
-远端：`https://github.com/popyun/knowledgeImportHub`，分支 `main`。已推送最新提交 `146b407`（方案 A vision 档：本地 qwen2.5vl:3b 接入，纯附加 review-only、默认关闭、零回归）。
+远端：`https://github.com/popyun/knowledgeImportHub`，分支 `main`。上一推送 `dc2f9b0`（文档同步 + 方案 A 回滚记录）。
 
-整页重建实验（7.18）已回滚，`git diff HEAD` 曾为空。本轮（7.19）文档改动 `README.md`、`README.zh-CN.md`、`PROJECT_SUMMARY.md`、`TASK_STATUS.md` **尚未提交推送**，待用户确认后提交。默认增强关闭，全 33 张缓存回归逐字节等价、`pytest tests/ -q` = 59 passed。
+本轮（7.20 方向 3 落地）提交：新增 `processors/region_rebuilder.py`、`tests/test_region_rebuild.py`；改 `config.yaml`、`processors/image_handler.py`、`processors/markdown_generator.py`、`TASK_STATUS.md`。默认 `region_rebuild:false`，全 33 张缓存回归 MATCH 33 / DIFF 0、`pytest tests/ -q` = 76 passed。（`_an.py`、`_regbaseline/` 为本地调试产物，不入库。）

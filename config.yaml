@@ -45,6 +45,18 @@ ocr:
     # "vision"/"vision_local"). Runs offline via the local ollama server.
     vision_model: "qwen2.5vl:3b"
     vision_timeout: 180
+    # Direction-3: per-region VLM rebuild for scrambled-layout slides.
+    # OFF by default. When on, only pages the generator flags as scrambled
+    # are split into regions, each transcribed by the local VLM at full
+    # resolution; the stitched result REPLACES the body only if it passes
+    # the per-token consistency guard, else it is shown as a compare block.
+    region_rebuild: false
+    region_rebuild_adopt: true
+    region_overlap: 0.08
+    rebuild_hit_min: 0.9
+    rebuild_fabricate_max: 0.05
+    rebuild_struct_min: 0.5
+    rebuild_max_regions: 6
     crop_pad: 14
     max_enhance_regions: 4
     # Reserved for a future adopt gate; review-only comparison this round.

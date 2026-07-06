@@ -54,6 +54,9 @@ class MarkdownGenerator(BaseHandler):
         # Enhanced (plan A) tables are persisted on the OCR result so cached
         # re-runs (which bypass ImageHandler) still render them.
         self._enhanced_tables = ocr_result.get("enhanced_tables", []) or []
+        # Direction-3 region rebuild verdict (persisted by ImageHandler); when
+        # adopted it replaces the body, else it is appended as a compare block.
+        self._region_rebuild = ocr_result.get("region_rebuild", {}) or {}
 
         # Extract components
         blocks = ocr_result.get("blocks", [])
@@ -78,6 +81,27 @@ class MarkdownGenerator(BaseHandler):
         title_heading = f"# {title}" if title else ""
         body_text = self._generate_body_text(content_blocks, title)
 
+        # Direction-3: if a region-rebuild verdict was adopted, replace the
+        # geometric body with the stitched VLM Markdown (front matter/title/
+        # noise filtering unchanged). Otherwise keep plan B body and, when a
+        # verdict exists, attach it as a review-only compare block below.
+        region_compare = ""
+        rr = self._region_rebuild
+        if rr.get("markdown"):
+            if rr.get("adopt"):
+                body_text = (
+                    "> [!note] \u672c\u9875\u6b63\u6587\u7531\u5206\u533a\u57df\u89c6\u89c9\u91cd\u5efa\u751f\u6210\u5e76\u901a\u8fc7\u4e00\u81f4\u6027\u6821\u9a8c"
+                    "\uff08hit=%.2f, fabricate=%.2f\uff09\n\n" % (
+                        float(rr.get("hit", 0.0)), float(rr.get("fabricate", 0.0)))
+                    + rr["markdown"].strip()
+                )
+            else:
+                reasons = "\uff1b".join(rr.get("reasons", [])) or "\u672a\u8fbe\u91c7\u7eb3\u9608\u503c"
+                region_compare = (
+                    "> [!tip] \u5206\u533a\u57df\u89c6\u89c9\u8bc6\u522b\u7ed3\u679c\uff08\u4f9b\u4eba\u5de5\u6bd4\u5bf9\uff0c\u672a\u91c7\u7eb3\uff09\uff1a"
+                    + reasons + "\n\n" + rr["markdown"].strip()
+                )
+
         # Drop external tables whose cell text is already rendered in the body
         # (fallback table_builder sometimes wraps a multi-column *text* slide as
         # one table, duplicating the reconstructed body content).
@@ -96,10 +120,43 @@ class MarkdownGenerator(BaseHandler):
         review_note = self._generate_review_note(title, title_meta)
 
         # Assemble complete note
-        note_parts = [front_matter, title_heading, body_text, tables_html, review_note, filtered_note, link_comments]
+        note_parts = [front_matter, title_heading, body_text, region_compare, tables_html, review_note, filtered_note, link_comments]
 
         return "\n\n".join(part for part in note_parts if part)
     
+
+    def needs_region_rebuild(self, ocr_result):
+        # Direction-3 trigger: decide whether a page is scrambled enough that
+        # a per-region VLM rebuild is worth attempting. Conservative by design
+        # -- prefer to skip (keep current output) over firing on a normal page.
+        # Runs a lightweight body pass to populate quality signals, then resets
+        # transient state so a later process() call is unaffected.
+        blocks = ocr_result.get("blocks", []) or []
+        content_blocks, _noise = self._partition_blocks(blocks)
+        text_blocks = [b for b in content_blocks if b.get("type") == "text" and b.get("text", "").strip()]
+        if len(text_blocks) < 6:
+            return False
+        # Populate _low_quality_regions / _table_quality_log via a body pass.
+        self._table_quality_log = []
+        self._low_quality_regions = []
+        title, _meta = self._extract_title(content_blocks, ocr_result.get("source", "") or "")
+        try:
+            self._generate_body_text(content_blocks, title)
+        except Exception:  # noqa: BLE001
+            return False
+        low_q = len(self._low_quality_regions)
+        # Signal 1: at least one low-confidence table region (matrix / merged).
+        if low_q >= 1:
+            return True
+        # Signal 2: many regions but few became tables -> fragmented scatter
+        # (flowchart / mixed layout that plan B breaks into loose text).
+        regions = self._split_into_reading_regions(text_blocks)
+        n_regions = len(regions)
+        n_table_regions = len(self._table_quality_log)
+        if n_regions >= 4 and n_table_regions == 0:
+            return True
+        return False
+
     def _generate_front_matter(
         self,
         source_path: str,

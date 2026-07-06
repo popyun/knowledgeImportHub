@@ -16,6 +16,7 @@ from .post_corrector import PostCorrector
 from .table_builder import TableBuilder
 from .markdown_generator import MarkdownGenerator
 from .table_enhancer import TableEnhancer
+from .region_rebuilder import RegionRebuilder
 from .host_profiler import load_or_create_profile, missing_vision_requirements
 from utils.file_utils import get_temp_file
 
@@ -50,6 +51,15 @@ class ImageHandler(BaseHandler):
             self.table_enhancer.tier,
             self.host_profile.get("reason", ""),
             "ON" if self.table_enhancer.enabled else "OFF",
+        )
+        # Direction-3: per-region VLM rebuild for scrambled-layout pages.
+        # Off by default; shares the generator's layout split + the local
+        # ollama vision channel. Never replaces plan B output unless the
+        # per-token consistency guard passes.
+        self.region_rebuilder = RegionRebuilder(config, generator=self.markdown_generator)
+        self.logger.info(
+            "Region-rebuild (direction 3) %s",
+            "ON" if self.region_rebuilder.enabled else "OFF",
         )
     
     def initialize(self) -> bool:
@@ -151,6 +161,31 @@ class ImageHandler(BaseHandler):
                             image_path,
                             link_candidates=[]
                         )
+
+            # Step 5c (direction 3): rebuild scrambled-layout pages region
+            # by region with the local VLM. Only fires when enabled AND the
+            # generator flags the page as scrambled. The stitched result is
+            # persisted (so cached re-runs render it) and either replaces the
+            # body (guard passed) or is attached as a review-only compare
+            # block. Any failure leaves the plan-B output untouched.
+            if self.region_rebuilder.enabled and \
+                    self.markdown_generator.needs_region_rebuild(corrected_result):
+                self.logger.debug("Step 5c: region-wise VLM rebuild")
+                verdict = self.region_rebuilder.rebuild(
+                    enhanced_image, corrected_result.get("blocks", [])
+                )
+                if verdict:
+                    corrected_result["region_rebuild"] = verdict
+                    self.logger.info(
+                        "Step 5c: rebuild adopt=%s hit=%.2f fab=%.2f struct=%.2f",
+                        verdict.get("adopt"), verdict.get("hit", 0.0),
+                        verdict.get("fabricate", 0.0), verdict.get("struct", 0.0),
+                    )
+                    markdown = self.markdown_generator.process(
+                        corrected_result,
+                        image_path,
+                        link_candidates=[]
+                    )
             
             # Populate result
             result["success"] = True
