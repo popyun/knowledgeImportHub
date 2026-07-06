@@ -101,6 +101,8 @@ On first run the pipeline probes host capability once and caches the result to `
 
 Enable it in `config.yaml` with `ocr.table_structure.enhance_on_low_quality: true`. Set `backend` to force a tier (`vision` / `gridboost` / `manual` / `ppstructure`); leave it empty to auto-select from the cached profile. Re-probe with `python test_snapshot.py` after deleting `host_profile.local.json`.
 
+> Why enhancement is off by default and which approaches were tried and rolled back or shelved (whole-page VLM rebuild, PP-Structure/gridboost, per-region rebuild) is documented in [PROJECT_HISTORY.md](PROJECT_HISTORY.md).
+
 ## Usage
 
 ### Start the watcher

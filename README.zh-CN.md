@@ -100,6 +100,8 @@ ocr:
 
 在 `config.yaml` 中设 `ocr.table_structure.enhance_on_low_quality: true` 开启。`backend` 可强制指定档位（`vision` / `gridboost` / `manual` / `ppstructure`），留空则按缓存档位自动选择。删除 `host_profile.local.json` 后再次运行即可重新探测。
 
+> 为何增强默认关闭，以及历史上尝试过但回滚 / 搁置的方向（整页 VLM 重建、PP-Structure/gridboost、分区域重建），详见 [PROJECT_HISTORY.md](PROJECT_HISTORY.md)。
+
 ## 使用
 
 ### 启动监听
