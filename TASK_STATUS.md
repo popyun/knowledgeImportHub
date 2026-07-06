@@ -360,8 +360,40 @@ python -c "import io; print(io.open(r'D:\test-temp\ocr_output\99-Audit\OCR-Pendi
 
 - 【结论与后续】vision 档对"表格型低置信区"（如 121125）确有正向提升，已按用户"先上 A 看效果"落地并验证零回归。但对 121053/121134 这类"版式错乱但不被判为低置信表格"的场景，vision 后端当前不触发；若要覆盖，需扩展触发判定（把复杂混排/低置信整区也纳入 vision 重识别），属下一步可选增强，待用户确认方向。默认仍关闭增强，保证对现有质量零负面影响。
 
+## 7.18 本轮实验（2026-07-05 迭代十九）：整页 VLM 重建 + 覆盖率护栏——验证后回滚
+
+按用户"可以尝试，通过测试结果看提升是否真实有效；无效或提升小则回滚"的指示，实验"扩展触发：把复杂混排/低置信整区交给本地 VLM `qwen2.5vl:3b` 整页转 Markdown，用覆盖率护栏决定是否采纳替换正文"。**结论：回滚放弃**，代码已恢复到 `146b407`，无残留。
+
+- 【实验设计】新增 `processors/vision_page.py`（`VisionPageRebuilder`）：整页发给 VLM 转 Markdown；覆盖率护栏 `coverage = VLM字符量 / OCR字符量`，`>= vision_page_adopt_coverage`（默认 0.75）才采纳替换正文，否则保持方案 B 正文不变。`image_handler` 加 Step 5c、`markdown_generator.process` 加采纳分支、`config.yaml` 加 `vision_page_rebuild`（默认 false）等键、`tests` 加 7 项单测。全程默认关闭、review 基础上做采纳门控。
+- 【探针实测】`121053`（流程图混排）VLM 整页转写 coverage=1.07，结构显著变好（四步骤标题 `## 计算WeightedNetJtD` 等、评级×公司/地方政府/主权矩阵、HBR/DRC 公式均还原，而方案 B 是零散短句）；`121134`（宽表）VLM 只吐左上一小块 coverage≈0，被护栏正确拒绝、保持方案 B 不变。
+- 【致命反例】`121131`（正常文本+18 行分组表）coverage=0.79 **通过护栏被采纳，但内容变差**：VLM 把方案 B 已正确的 18 行分组表压成 15 行、行号错乱、评级与行业列被合并、丢失部分内容，还多出一行 `$\text{...}$` LaTeX 噪音。
+- 【回滚理由】覆盖率护栏只能保证"字数够"，拦不住 VLM 在字数达标时**重排/合并/篡改**表格内容。这违反用户硬约束"每张图必须变好或不变差"。要可靠判断"VLM 未篡改"所需的校验与重做一遍 OCR 同样难，没有轻量护栏能兜住。对 121053 有效仅因其原本结构全丢、怎么改都是改善，不能推广到已正常的图。
+- 【处置】`git checkout` 恢复 4 个被改文件、删除 `processors/vision_page.py`；`git diff HEAD` 为空，`pytest tests/ -q` = 59 passed。上一轮 vision 档比对档成果（7.17，`146b407`，已推送）完整保留、未受影响。测试输出目录 `_visionprobe`/`_pagerebuild`/`_visiontest` 已清理。
+- 【教训留档】若未来重启"整区/整页 VLM 重建"方向，可行前提是：换更强模型，或把采纳范围严格限制在"方案 B 明确失败（区域判低置信且无表格结构）"的图上、并对表格做逐单元格一致性校验（工程量更大，需先确认方向）。
+
+## 7.19 文档同步（2026-07-06）：README + PROJECT_SUMMARY 对齐最新架构
+
+代码演进（host_profiler 首启探测分档、table_enhancer 三档可插拔后端、markdown_generator 版面还原引擎）此前未反映到设计文档，本轮对齐（仅改文档，未动代码；`pytest` 仍 59 passed）：
+- `README.md` / `README.zh-CN.md`：Features 加分层增强；Requirements 补 vision 档说明；Configuration 补 `table_structure` 配置块；项目结构补 `host_profiler.py`/`table_enhancer.py`/`host_profile.local.json`；Workflow 加可选增强步骤并重编号；新增"分层表格增强（方案 A）"专节。
+- `PROJECT_SUMMARY.md`：整篇重写为当前架构文档（流水线 + 三档分档双架构图、模块清单、版面还原能力、方案 A 设计原则与"为何 review-only/整页重建被回滚"实测结论、配置要点、固定依赖、已知限制）。旧版停留在初始态（9 passed / v1.0.0 / 旧依赖 / 纯线性图）已废弃。
+- 一致性校验：文档引用模块文件均存在、`_TABLE_QUALITY_MIN=0.62`/config 项/模型名 `qwen2.5vl:3b` 与代码一致、三份文档零乱码（无 U+FFFD）。
+
+## 9. 当前未决任务清单（截至 2026-07-06）
+
+已闭环（早期记录的问题均已在后续迭代修复，见对应小节）：
+- 正文被误过滤 / 正文与表格重复（P1，7.3 修）、稀疏表格漏检（P1，7.5 修）、标题整段入题（P1，7.9 修）、表格底行误过滤 + 页号误取（P1，7.11 修）、标题叠字/破折号/空格（P2，7.12 修）、工具栏 OCR 错字残片漏过滤/错判页眉（P2，7.13 修）。
+
+仍未决（结构性 / OCR 精度极限，非版面层可根治）：
+1. 【并排合并宽表拆分】`121134`（加权敏感度表 + CSR WEIGHT 表并排合并成 8 列）、`121150`/`121157` 宽矩阵：列间无几何天沟、质量分高于阈值不触发告警，几何法无法拆分，唯一区分依据是语义。用户已同意 121134 暂缓。方案 A（PP-Structure/gridboost/vision 档）实测在本语料未能稳定优于方案 B，故维持 review-only + 默认关闭。属"待更强模型或语义级拆分"的后续项。
+2. 【复杂混排流程图触发扩展】`121053`（多步骤流程图式图文混排）：方案 B 打散结构，但不被判为"低置信表格"，故 vision 后端当前不触发。整页 VLM 重建实验（7.18）已验证"能改善但无法保证不变差"而回滚。属"待更强模型 + 精准采纳判据"的后续项，需用户确认方向再动。
+3. 【大数值矩阵识别】`121125`（18×18 相关系数矩阵）等超大数值网格：OCR bbox 精度极限，数字粘连、列错位。vision 档对其低置信区有正向提升（`S_b 0.43 → S_e 0.86`）但仅 review-only 呈现；彻底结构化需更强表格模型或人工复核。
+
+待办（非缺陷）：
+- 本轮文档改动（`README.md`/`README.zh-CN.md`/`PROJECT_SUMMARY.md`）尚未提交推送；见第 8 节。
+
+
 ## 8. Git
 
-远端：`https://github.com/popyun/knowledgeImportHub`，分支 `main`。方案 A vision 档（本地 qwen2.5vl:3b 接入）本轮改动待提交推送：`processors/table_enhancer.py`、`config.yaml`、`tests/test_pipeline.py`、`TASK_STATUS.md`。
+远端：`https://github.com/popyun/knowledgeImportHub`，分支 `main`。已推送最新提交 `146b407`（方案 A vision 档：本地 qwen2.5vl:3b 接入，纯附加 review-only、默认关闭、零回归）。
 
-默认增强关闭，全 33 张缓存回归逐字节等价、`pytest tests/ -q` = 59 passed。vision 档为纯附加 review-only，对现有线上输出零负面影响。
+整页重建实验（7.18）已回滚，`git diff HEAD` 曾为空。本轮（7.19）文档改动 `README.md`、`README.zh-CN.md`、`PROJECT_SUMMARY.md`、`TASK_STATUS.md` **尚未提交推送**，待用户确认后提交。默认增强关闭，全 33 张缓存回归逐字节等价、`pytest tests/ -q` = 59 passed。

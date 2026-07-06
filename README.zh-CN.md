@@ -11,6 +11,7 @@
 - **多引擎 OCR**：按内容类型路由到 PaddleOCR / MinerU / Mathpix
 - **版面还原**：从 OCR 文本块重建标题、阅读顺序区域与表格
 - **表格重建**：保留单元格颜色，输出 Markdown 表格与带 `bgcolor` 的 HTML 表格
+- **分层表格增强（方案 A）**：可选的、仅供比对的重识别流程，对低置信表格区域用主机自选后端（`gridboost` / `vision` / `manual`）重新识别；默认关闭，且绝不替换主输出
 - **噪音过滤**：编辑器工具栏 / PPT 页眉页脚会被移入底部审核区块并标注过滤原因，而非直接丢弃
 - **LLM 后校正**：使用本地 Ollama 模型修正 OCR 错误
 - **智能链接**：为已有 Obsidian 笔记自动生成 wiki 链接
@@ -29,6 +30,8 @@ numpy==1.26.4
 opencv-python==4.6.0.66
 opencv-contrib-python==4.6.0.66
 ```
+
+分层增强（方案 A）为可选项。`vision` 档额外需要本地 Ollama 视觉模型（例如 `ollama pull qwen2.5vl:3b`），且仅当首启探测到加速器或充足空闲内存时才会选中；在纯 CPU 主机上探测结果为 `gridboost`（纯 OpenCV 预处理），且增强默认关闭，需显式开启。
 
 ## 安装
 
@@ -78,7 +81,24 @@ ocr:
   ollama:
     endpoint: "http://localhost:11434"
     model: "qwen2.5:1.5b"
+  table_structure:
+    enhance_on_low_quality: false   # 方案 A 总开关（默认关闭）
+    backend: ""                     # 空 = 按主机档位自动选择
+    vision_model: "qwen2.5vl:3b"    # vision 档使用的模型
+    vision_timeout: 180
 ```
+
+## 分层表格增强（方案 A）
+
+对于彩色 / 无边框幻灯片，当几何版面还原产出的表格置信度偏低时，可选的增强流程会只对该区域重新识别，并把结果作为**仅供人工比对**的区块附加在告警下方。它**默认关闭**、**绝不替换**主输出，因此开启后只会新增信息（对主渲染零回归）。
+
+首次运行时，流水线会探测一次主机能力并缓存到 `host_profile.local.json`，映射到三档之一：
+
+- `vision`：具备加速器（CUDA/MPS）或充足空闲内存，且本地有 Ollama 视觉模型；裁剪区由视觉模型（如 `qwen2.5vl:3b`）转写。
+- `gridboost`：纯 CPU 但可用 PaddleOCR（常见情况）；对区域先去底色 / 二值化、再依据 OCR 词框补虚拟网格线，然后交给 PP-Structure 重识别。
+- `manual`：PP-Structure 不可用或资源不足；不增强，仅输出低置信告警供人工复核。
+
+在 `config.yaml` 中设 `ocr.table_structure.enhance_on_low_quality: true` 开启。`backend` 可强制指定档位（`vision` / `gridboost` / `manual` / `ppstructure`），留空则按缓存档位自动选择。删除 `host_profile.local.json` 后再次运行即可重新探测。
 
 ## 使用
 
@@ -155,6 +175,7 @@ knowledge_import_hub/
 - queue_manager.py            # SQLite 任务队列
 - run_test.py                 # 环境检查（真实测试见 test_snapshot.py）
 - test_snapshot.py            # 快照测试 / 迭代对比
+- host_profile.local.json     # 首次运行生成；缓存主机档位（已 git 忽略）
 - processors/
   - base.py                   # 抽象基类
   - image_handler.py          # 流水线编排
@@ -163,6 +184,8 @@ knowledge_import_hub/
   - ocr_router.py             # OCR 引擎选择（PaddleOCR + PP-Structure）
   - post_corrector.py         # LLM 校正
   - table_builder.py          # 兜底 HTML 表格构建
+  - host_profiler.py            # 首启主机能力探测 + 档位缓存（方案 A）
+  - table_enhancer.py           # 可插拔增强后端（gridboost/vision/manual）
   - markdown_generator.py     # 版面还原与 Markdown 组装
 - publishers/
   - obsidian_publisher.py     # 笔记发布
@@ -188,9 +211,10 @@ knowledge_import_hub/
 5. **OCR 处理**：路由到相应引擎
 6. **后校正**：LLM 修正低置信度文本
 7. **版面与表格**：重建区域与表格（保留颜色）
-8. **Markdown 生成**：组装带 YAML front matter 的笔记
-9. **实体链接**：生成 wiki 链接候选
-10. **发布**：写入审核目录待人工复核
+8. **可选增强（方案 A）**：开启时，对低置信表格区域用主机自选后端重识别，并以仅供比对的区块附加在告警下方
+9. **Markdown 生成**：组装带 YAML front matter 的笔记
+10. **实体链接**：生成 wiki 链接候选
+11. **发布**：写入审核目录待人工复核
 
 ## 输出格式
 

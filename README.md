@@ -12,6 +12,7 @@ structured Markdown notes into an Obsidian vault.
 - **Multi-Engine OCR**: Routes to PaddleOCR / MinerU / Mathpix based on content type
 - **Layout-Aware Reconstruction**: Rebuilds titles, reading-order regions, and tables from OCR blocks
 - **Table Reconstruction**: Preserves cell colors and generates tables (Markdown and HTML with `bgcolor`)
+- **Tiered Table Enhancement (Plan A)**: An optional, review-only pass re-recognizes low-confidence table regions using a host-selected backend (`gridboost` / `vision` / `manual`); off by default and never replaces the primary output
 - **Noise Filtering**: Editor toolbars / PPT headers / footers are moved to a review block with reasons, not discarded
 - **LLM Post-Correction**: Uses a local Ollama model for OCR error correction
 - **Smart Linking**: Auto-generates wiki-links to existing Obsidian notes
@@ -30,6 +31,8 @@ numpy==1.26.4
 opencv-python==4.6.0.66
 opencv-contrib-python==4.6.0.66
 ```
+
+The tiered enhancement (Plan A) is optional. The `vision` tier additionally needs a local Ollama vision model (e.g. `ollama pull qwen2.5vl:3b`); it is only selected when the host profile detects an accelerator or ample free RAM. On CPU-only hosts the profiler picks `gridboost` (pure OpenCV preprocessing) and enhancement stays off unless enabled.
 
 ## Installation
 
@@ -79,7 +82,24 @@ ocr:
   ollama:
     endpoint: "http://localhost:11434"
     model: "qwen2.5:1.5b"
+  table_structure:
+    enhance_on_low_quality: false   # Plan A master switch (off by default)
+    backend: ""                     # "" = auto-select from host profile
+    vision_model: "qwen2.5vl:3b"    # model used by the vision tier
+    vision_timeout: 180
 ```
+
+## Tiered Table Enhancement (Plan A)
+
+For colored/borderless slides where the geometric reconstruction produces a low-confidence table, an optional enhancement pass can re-recognize just that region and attach the result as a review-only comparison block. It is **off by default** and **never replaces** the primary output, so enabling it can only add information (zero regression on the main rendering).
+
+On first run the pipeline probes host capability once and caches the result to `host_profile.local.json`, mapping it to one of three tiers:
+
+- `vision`: an accelerator (CUDA/MPS) or ample free RAM plus a local Ollama vision model is available; the cropped region is transcribed by the vision model (e.g. `qwen2.5vl:3b`).
+- `gridboost`: CPU-only host with PaddleOCR available (the common case); the region is decolorized/binarized and virtual grid lines are drawn from OCR word boxes before PP-Structure re-recognition.
+- `manual`: PP-Structure unavailable or resources too low; no enhancement, a low-confidence warning is emitted for human review.
+
+Enable it in `config.yaml` with `ocr.table_structure.enhance_on_low_quality: true`. Set `backend` to force a tier (`vision` / `gridboost` / `manual` / `ppstructure`); leave it empty to auto-select from the cached profile. Re-probe with `python test_snapshot.py` after deleting `host_profile.local.json`.
 
 ## Usage
 
@@ -160,6 +180,7 @@ knowledge_import_hub/
 - queue_manager.py            # SQLite task queue
 - run_test.py                 # Setup checker (see test_snapshot.py for real runs)
 - test_snapshot.py            # Snapshot testing / iteration comparison
+- host_profile.local.json     # Generated on first run; cached host tier (git-ignored)
 - processors/
   - base.py                   # Abstract base handler
   - image_handler.py          # Pipeline orchestrator
@@ -168,6 +189,8 @@ knowledge_import_hub/
   - ocr_router.py             # OCR engine selection (PaddleOCR + PP-Structure)
   - post_corrector.py         # LLM correction
   - table_builder.py          # Fallback HTML table generation
+  - host_profiler.py            # First-run host capability probe + tier cache (Plan A)
+  - table_enhancer.py           # Pluggable enhancement backends (gridboost/vision/manual)
   - markdown_generator.py     # Layout reconstruction and Markdown assembly
 - publishers/
   - obsidian_publisher.py     # Note publishing
@@ -193,9 +216,10 @@ knowledge_import_hub/
 5. **OCR Processing**: routes to the appropriate engine
 6. **Post-Correction**: LLM corrects low-confidence text
 7. **Layout & Tables**: reconstructs regions and tables (colors preserved)
-8. **Markdown Generation**: assembles a note with YAML front matter
-9. **Entity Linking**: generates wiki-link candidates
-10. **Publishing**: writes the note to the audit folder for review
+8. **Optional Enhancement (Plan A)**: when enabled, low-confidence table regions are re-recognized by the host-selected backend and attached as a review-only comparison block
+9. **Markdown Generation**: assembles a note with YAML front matter
+10. **Entity Linking**: generates wiki-link candidates
+11. **Publishing**: writes the note to the audit folder for review
 
 ## Output Format
 
