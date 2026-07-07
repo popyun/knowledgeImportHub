@@ -35,3 +35,8 @@ Thumbs.db
 *.local.json
 # host capability cache (plan A tiered enhancement)
 host_profile.local.json
+
+# Local debug/regression artifacts (not tracked)
+_an.py
+_mainenv_baseline.txt
+_regbaseline/

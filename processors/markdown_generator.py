@@ -1115,8 +1115,13 @@ ocr_confidence: {confidence:.2f}
         markdown_table = self._html_table_to_markdown(best.get("html", ""))
         if not markdown_table:
             return ""
+        engine_label = "PP-Structure"
+        if (best.get("backend") == "ppstructurev3"
+                or best.get("engine") == "ppstructurev3"):
+            engine_label = "PP-StructureV3"
         return (
-            "> [!tip] 增强识别结果（PP-Structure，供人工比对，未替换上方主输出）：\n\n"
+            "> [!tip] 增强识别结果（" + engine_label
+            + "，供人工比对，未替换上方主输出）：\n\n"
             + markdown_table
         )
 

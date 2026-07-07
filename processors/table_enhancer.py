@@ -257,6 +257,166 @@ class GridBoostBackend(_PPStructureBackendBase):
         return self._recognize(processed)
 
 
+class PPStructureV3Backend:
+    """PP-StructureV3 backend (paddleocr 3.x): re-recognize a low-confidence
+    table crop with the newer layout+table pipeline.
+
+    Enabled only via config ``backend: "ppstructurev3"`` (never auto-selected by
+    the host profiler). PP-StructureV3 needs paddleocr 3.x. Because upgrading
+    the main environment to paddle 3.x would swap the text-OCR models for the
+    whole pipeline (PP-OCRv4 -> v5) and change existing outputs, this backend
+    runs the model in an ISOLATED paddleocr-3.x python via subprocess by
+    default (config ``ppstructurev3_python``), keeping the main interpreter on
+    2.7.3. If paddleocr 3.x is importable in-process (a future upgraded env),
+    it runs in-process instead. Any failure returns None so the enhancer
+    degrades safely to the plan-B main output.
+
+    PP-StructureV3 emits markdown with an embedded HTML ``<table>``; we extract
+    the first table so downstream scoring/rendering consumes it like the other
+    backends.
+    """
+
+    name = "ppstructurev3"
+
+    def __init__(self, lang="ch", show_log=False, python_exe=None):
+        self.lang = lang
+        self.show_log = show_log
+        # Path to a paddleocr-3.x python; when set (and paddleocr 3.x is not
+        # importable in-process) the backend runs via subprocess isolation.
+        self.python_exe = python_exe
+        self._engine = None
+        self._inproc_ok = None  # tri-state: None=unknown, True/False after probe
+
+    def _can_run_inproc(self):
+        if self._inproc_ok is None:
+            try:
+                import os as _os
+                _os.environ.setdefault("PADDLE_PDX_MODEL_SOURCE", "BOS")
+                from paddleocr import PPStructureV3  # noqa: F401
+                self._inproc_ok = True
+            except Exception:  # noqa: BLE001
+                self._inproc_ok = False
+        return self._inproc_ok
+
+    def _get_engine(self):
+        if self._engine is None:
+            try:
+                import os as _os
+                _os.environ.setdefault("PADDLE_PDX_MODEL_SOURCE", "BOS")
+                from paddleocr import PPStructureV3
+                self._engine = PPStructureV3(device="cpu")
+            except ImportError:
+                logger.warning("PP-StructureV3 not available (needs paddleocr 3.x)")
+                return None
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to init PP-StructureV3 enhancer: %s", exc)
+                return None
+        return self._engine
+
+    @staticmethod
+    def _extract_table_html(results):
+        """Pull the first <table>...</table> out of PP-StructureV3 results.
+
+        V3 exposes per-page markdown (``res.markdown`` / ``markdown['markdown_texts']``)
+        that embeds HTML tables; we regex the first table out of whatever text
+        representation we can reach, falling back to the JSON dump.
+        """
+        if not results:
+            return None
+        for res in results:
+            texts = []
+            md = getattr(res, "markdown", None)
+            if isinstance(md, dict):
+                mt = md.get("markdown_texts")
+                if mt:
+                    texts.append(mt if isinstance(mt, str) else str(mt))
+            elif isinstance(md, str):
+                texts.append(md)
+            try:
+                j = getattr(res, "json", None)
+                if j is not None:
+                    texts.append(j if isinstance(j, str) else str(j))
+            except Exception:  # noqa: BLE001
+                pass
+            for text in texts:
+                if not text:
+                    continue
+                m = re.search(r"<table.*?</table>", text, re.IGNORECASE | re.DOTALL)
+                if m:
+                    return m.group(0)
+        return None
+
+    def _run_inproc(self, crop):
+        engine = self._get_engine()
+        if engine is None:
+            return None
+        try:
+            results = engine.predict(crop)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("PP-StructureV3 recognition failed: %s", exc)
+            return None
+        return self._extract_table_html(results)
+
+    def _run_subprocess(self, crop):
+        """Write the crop to a temp PNG and recognize it in an isolated
+        paddleocr-3.x python via the committed worker script."""
+        import json as _json
+        import os as _os
+        import subprocess
+        import tempfile
+        try:
+            import cv2
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("PP-StructureV3 subprocess needs cv2 (%s)", exc)
+            return None
+        worker = _os.path.join(_os.path.dirname(__file__), "_ppstructurev3_worker.py")
+        if not _os.path.exists(worker):
+            logger.warning("PP-StructureV3 worker script missing: %s", worker)
+            return None
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(suffix=".png", prefix="ppv3_")
+            _os.close(fd)
+            ok, buf = cv2.imencode(".png", crop)
+            if not ok:
+                return None
+            buf.tofile(tmp)  # handles unicode temp paths
+            proc = subprocess.run(
+                [self.python_exe, worker, tmp],
+                capture_output=True, timeout=900,
+            )
+            out = (proc.stdout or b"").decode("utf-8", "replace").strip()
+            if not out:
+                logger.warning("PP-StructureV3 worker: empty output (rc=%s) %s",
+                               proc.returncode,
+                               (proc.stderr or b"").decode("utf-8", "replace")[-300:])
+                return None
+            data = _json.loads(out)
+            if data.get("error"):
+                logger.warning("PP-StructureV3 worker error: %s", data["error"])
+            return data.get("html")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("PP-StructureV3 subprocess failed: %s", exc)
+            return None
+        finally:
+            if tmp and _os.path.exists(tmp):
+                try:
+                    _os.remove(tmp)
+                except OSError:
+                    pass
+
+    def run(self, crop, region, region_blocks, offset_xy):
+        if self._can_run_inproc():
+            return self._run_inproc(crop)
+        if self.python_exe:
+            return self._run_subprocess(crop)
+        logger.warning(
+            "PP-StructureV3 unavailable: paddleocr 3.x not importable and no "
+            "ppstructurev3_python configured; skipping (plan-B output kept)."
+        )
+        return None
+
+
 class VisionLocalBackend:
     """Offline local vision model backend (vision tier).
 
@@ -376,6 +536,9 @@ class TableEnhancer:
         self.scale = int(((config.get("image", {}) or {}).get("super_resolution", {}) or {}).get("scale", 2)) or 1
         self.pad = int(ts.get("crop_pad", 14))
         self.max_regions = int(ts.get("max_enhance_regions", 4))
+        # Path to a paddleocr-3.x python for the isolated PP-StructureV3 backend
+        # (empty => run in-process if paddleocr 3.x is importable, else skip).
+        self.ppstructurev3_python = ts.get("ppstructurev3_python", "") or None
         # Tier resolution order: explicit config override > passed tier > gridboost.
         self.tier = ts.get("backend") or tier or "gridboost"
         self.adopt_margin = float(ts.get("enhance_adopt_margin", 0.1))
@@ -391,6 +554,11 @@ class TableEnhancer:
             self._backend = VisionLocalBackend(self.config)
         elif tier == "ppstructure":
             self._backend = PPStructureBackend(lang=self.lang, show_log=self.show_log)
+        elif tier == "ppstructurev3":
+            self._backend = PPStructureV3Backend(
+                lang=self.lang, show_log=self.show_log,
+                python_exe=self.ppstructurev3_python,
+            )
         else:  # gridboost (default) and any unknown tier fall back to gridboost
             self._backend = GridBoostBackend(lang=self.lang, show_log=self.show_log)
         return self._backend
@@ -430,12 +598,24 @@ class TableEnhancer:
                 continue
             crop = enhanced_image[cy0:cy1, cx0:cx1]
             region_blocks = self._blocks_in_bbox(blocks, [cx0, cy0, cx1, cy1])
+            # Applicability pre-check: PP-StructureV3 is slow (minutes on CPU),
+            # so only pay the cost when the region looks like a regular ruled
+            # table. Flowcharts / ultra-dense matrices are skipped, keeping the
+            # plan-B "> [!warning] human review" fallback. Other backends are
+            # unaffected by this gate.
+            if self.tier == "ppstructurev3":
+                fit = self._v3_applicable(region, region_blocks)
+                if not fit.get("applicable"):
+                    self.logger.debug(
+                        "PP-StructureV3 skipped region (%s)", fit.get("reason")
+                    )
+                    continue
             html = backend.run(crop, region, region_blocks, (cx0, cy0))
             if not html:
                 continue
             se = enhanced_quality(html)
             sb = float(region.get("quality", 0.0))
-            results.append({
+            item = {
                 "html": html,
                 "region": region,
                 "engine": backend.name,
@@ -443,8 +623,104 @@ class TableEnhancer:
                 "score_enhanced": round(se["score"], 3),
                 "score_base": round(sb, 3),
                 "verdict": "compare",  # review-only this round; adopt gate reserved
-            })
+            }
+            if self.tier == "ppstructurev3":
+                item["applicable"] = self._v3_applicable(region, region_blocks)
+            results.append(item)
         return results
+
+    # Dense-matrix / flowchart guard rails for PP-StructureV3 applicability.
+    _V3_MIN_ROWS = 3
+    _V3_MIN_COLS = 2
+    _V3_MAX_COLS = 12          # beyond this it is an ultra-dense matrix
+    _V3_ROW_STAB_MIN = 0.55    # per-row column-count consistency
+
+    def _v3_applicable(self, region, region_blocks):
+        """Structure-cue pre-check: is this low-confidence region a regular
+        ruled table (worth a slow PP-StructureV3 pass), or a flowchart /
+        ultra-dense matrix (skip -> human review)?
+
+        Uses only geometry already available from OCR blocks: cluster word-box
+        centers into rows/columns and require enough rows, a sane column count,
+        and stable per-row column counts. Returns a dict with the decision plus
+        its component metrics for auditability.
+        """
+        blocks = [b for b in (region_blocks or []) if b.get("bbox")]
+        if len(blocks) < self._V3_MIN_ROWS:
+            return {"applicable": False, "reason": "too few text boxes",
+                    "n_rows": 0, "n_cols": 0, "row_stab": 0.0}
+
+        ys, xs, heights = [], [], []
+        for b in blocks:
+            bb = b["bbox"]
+            yy = [p[1] for p in bb]
+            xx = [p[0] for p in bb]
+            ys.append((min(yy) + max(yy)) / 2.0)
+            xs.append((min(xx) + max(xx)) / 2.0)
+            heights.append(max(yy) - min(yy))
+        med_h = sorted(heights)[len(heights) // 2] or 1.0
+
+        rows = self._cluster_1d(ys, gap=max(med_h * 0.8, 8.0))
+        cols = self._cluster_1d(xs, gap=max(med_h * 1.2, 12.0))
+        n_rows = len(rows)
+        n_cols = len(cols)
+
+        # Assign each block to its nearest column center to measure per-row
+        # column-count stability (regular tables fill columns consistently).
+        col_centers = [sum(c) / len(c) for c in cols] if cols else []
+        row_members = self._assign_rows(blocks, ys, rows)
+        per_row_cols = []
+        for members in row_members:
+            used = set()
+            for idx in members:
+                cx = xs[idx]
+                if col_centers:
+                    j = min(range(len(col_centers)), key=lambda k: abs(col_centers[k] - cx))
+                    used.add(j)
+            per_row_cols.append(len(used))
+        if per_row_cols:
+            mean_c = sum(per_row_cols) / len(per_row_cols)
+            var = sum((c - mean_c) ** 2 for c in per_row_cols) / len(per_row_cols)
+            row_stab = max(0.0, 1.0 - (var ** 0.5) / max(mean_c, 1.0))
+        else:
+            row_stab = 0.0
+
+        metrics = {"n_rows": n_rows, "n_cols": n_cols, "row_stab": round(row_stab, 3)}
+        if n_rows < self._V3_MIN_ROWS:
+            return {"applicable": False, "reason": "too few rows", **metrics}
+        if n_cols < self._V3_MIN_COLS:
+            return {"applicable": False, "reason": "too few columns (not tabular)", **metrics}
+        if n_cols > self._V3_MAX_COLS:
+            return {"applicable": False, "reason": "ultra-dense matrix", **metrics}
+        if row_stab < self._V3_ROW_STAB_MIN:
+            return {"applicable": False, "reason": "irregular layout (flowchart?)", **metrics}
+        return {"applicable": True, "reason": "regular ruled table", **metrics}
+
+    @staticmethod
+    def _cluster_1d(values, gap):
+        """Cluster 1-D coordinates into groups separated by >= gap."""
+        if not values:
+            return []
+        vals = sorted(values)
+        clusters = [[vals[0]]]
+        for v in vals[1:]:
+            if v - clusters[-1][-1] > gap:
+                clusters.append([v])
+            else:
+                clusters[-1].append(v)
+        return clusters
+
+    @staticmethod
+    def _assign_rows(blocks, ys, rows):
+        """Return, for each row cluster, the indices of blocks nearest to it."""
+        row_centers = [sum(r) / len(r) for r in rows] if rows else []
+        members = [[] for _ in row_centers]
+        if not row_centers:
+            return members
+        for i in range(len(blocks)):
+            j = min(range(len(row_centers)), key=lambda k: abs(row_centers[k] - ys[i]))
+            members[j].append(i)
+        return members
 
     @staticmethod
     def _blocks_in_bbox(blocks, bbox):

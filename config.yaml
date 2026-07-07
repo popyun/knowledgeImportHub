@@ -39,7 +39,18 @@ ocr:
     enhance_on_low_quality: false
     # Backend override for the enhancement tier. Empty => auto-select from
     # host_profile.local.json (vision | gridboost | manual | ppstructure).
+    # "ppstructurev3" forces the PaddleOCR 3.x PP-StructureV3 backend for
+    # low-confidence table regions (never auto-selected; needs paddleocr 3.x).
+    # It only runs on regions the applicability pre-check flags as a regular
+    # ruled table; flowcharts / ultra-dense matrices keep the human-review
+    # fallback. Result is a review-only compare block; main output unchanged.
     backend: ""
+    # Isolated paddleocr-3.x python for the PP-StructureV3 backend. When set,
+    # V3 runs via subprocess so the main env can stay on paddleocr 2.7.3 (its
+    # text OCR is unchanged). Empty => run in-process only if paddleocr 3.x is
+    # importable, else skip (plan-B output kept). Example:
+    #   ppstructurev3_python: "D:/ocr_probe/venv_ppv3/Scripts/python.exe"
+    ppstructurev3_python: ""
     # Local vision-model backend (vision tier) settings. Used only when the
     # host profile selects the "vision" tier (or backend is forced to
     # "vision"/"vision_local"). Runs offline via the local ollama server.

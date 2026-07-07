@@ -634,6 +634,178 @@ class TestVisionLocalBackend:
             assert be.run(self._crop(), {}, [], (0, 0)) is None
 
 
+class TestPPStructureV3Backend:
+    """PP-StructureV3 enhancement backend: selection + applicability + degrade."""
+
+    def _cell(self, cx, cy, w=30, h=18, text="x"):
+        x0, x1 = cx - w / 2, cx + w / 2
+        y0, y1 = cy - h / 2, cy + h / 2
+        return {"type": "text", "text": text, "confidence": 0.9,
+                "bbox": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]}
+
+    def _regular_table_blocks(self):
+        # 4 rows x 3 columns, consistent -> should be applicable.
+        cols = [40, 140, 240]
+        rows_y = [20, 60, 100, 140]
+        return [self._cell(cx, cy) for cy in rows_y for cx in cols]
+
+    def _flowchart_blocks(self):
+        # Varying number of boxes per row (1 / 3 / 1 / 2) -> unstable columns,
+        # the signature of a flowchart rather than a ruled table.
+        rows = {20: [150], 70: [40, 150, 260], 120: [40], 170: [150, 260]}
+        return [self._cell(cx, cy) for cy, xs in rows.items() for cx in xs]
+
+    def _dense_matrix_blocks(self):
+        # 4 rows x 18 columns -> ultra-dense matrix, skip.
+        cols = [20 + i * 40 for i in range(18)]
+        rows_y = [20, 60, 100, 140]
+        return [self._cell(cx, cy, w=24) for cy in rows_y for cx in cols]
+
+    def test_tier_selects_ppstructurev3_backend(self):
+        from processors.table_enhancer import TableEnhancer, PPStructureV3Backend
+        enh = TableEnhancer({}, tier="ppstructurev3")
+        assert isinstance(enh._get_backend(), PPStructureV3Backend)
+
+    def test_config_backend_override_ppstructurev3(self):
+        from processors.table_enhancer import TableEnhancer, PPStructureV3Backend
+        enh = TableEnhancer(
+            {"ocr": {"table_structure": {"backend": "ppstructurev3"}}},
+            tier="gridboost",
+        )
+        assert enh.tier == "ppstructurev3"
+        assert isinstance(enh._get_backend(), PPStructureV3Backend)
+
+    def test_applicable_for_regular_table(self):
+        from processors.table_enhancer import TableEnhancer
+        enh = TableEnhancer({}, tier="ppstructurev3")
+        fit = enh._v3_applicable({"bbox": [0, 0, 300, 160]}, self._regular_table_blocks())
+        assert fit["applicable"] is True
+        assert fit["n_rows"] >= 3 and fit["n_cols"] >= 2
+
+    def test_not_applicable_for_flowchart(self):
+        from processors.table_enhancer import TableEnhancer
+        enh = TableEnhancer({}, tier="ppstructurev3")
+        fit = enh._v3_applicable({"bbox": [0, 0, 300, 200]}, self._flowchart_blocks())
+        assert fit["applicable"] is False
+
+    def test_not_applicable_for_dense_matrix(self):
+        from processors.table_enhancer import TableEnhancer
+        enh = TableEnhancer({}, tier="ppstructurev3")
+        fit = enh._v3_applicable({"bbox": [0, 0, 720, 160]}, self._dense_matrix_blocks())
+        assert fit["applicable"] is False
+        assert fit["reason"] == "ultra-dense matrix"
+
+    def test_extract_table_html_from_v3_markdown(self):
+        from processors.table_enhancer import PPStructureV3Backend
+
+        class _Res:
+            markdown = {"markdown_texts": "# title\n\ntext\n\n"
+                        "<div><table><tr><td>a</td><td>b</td></tr></table></div>\nmore"}
+
+        html = PPStructureV3Backend._extract_table_html([_Res()])
+        assert html == "<table><tr><td>a</td><td>b</td></tr></table>"
+
+    def test_extract_table_html_none_when_absent(self):
+        from processors.table_enhancer import PPStructureV3Backend
+
+        class _Res:
+            markdown = {"markdown_texts": "# just text, no table"}
+
+        assert PPStructureV3Backend._extract_table_html([_Res()]) is None
+        assert PPStructureV3Backend._extract_table_html([]) is None
+
+    def test_run_degrades_when_engine_unavailable(self):
+        from processors.table_enhancer import PPStructureV3Backend
+        import numpy as np
+        be = PPStructureV3Backend()
+        # No paddleocr 3.x here -> _get_engine returns None -> run() returns None.
+        with patch.object(be, "_get_engine", return_value=None):
+            crop = np.full((40, 80, 3), 255, dtype=np.uint8)
+            assert be.run(crop, {}, [], (0, 0)) is None
+
+    def test_backend_carries_python_exe_from_config(self):
+        from processors.table_enhancer import TableEnhancer, PPStructureV3Backend
+        enh = TableEnhancer(
+            {"ocr": {"table_structure": {
+                "backend": "ppstructurev3",
+                "ppstructurev3_python": "X:/py.exe"}}},
+            tier="gridboost",
+        )
+        be = enh._get_backend()
+        assert isinstance(be, PPStructureV3Backend)
+        assert be.python_exe == "X:/py.exe"
+
+    def test_run_uses_subprocess_when_no_inproc(self):
+        from processors.table_enhancer import PPStructureV3Backend
+        import numpy as np
+        be = PPStructureV3Backend(python_exe="X:/py.exe")
+        crop = np.full((40, 80, 3), 255, dtype=np.uint8)
+        with patch.object(be, "_can_run_inproc", return_value=False), \
+             patch.object(be, "_run_subprocess", return_value="<table><tr><td>a</td></tr></table>") as sub:
+            html = be.run(crop, {}, [], (0, 0))
+        assert html == "<table><tr><td>a</td></tr></table>"
+        sub.assert_called_once()
+
+    def test_run_skips_when_no_inproc_and_no_python(self):
+        from processors.table_enhancer import PPStructureV3Backend
+        import numpy as np
+        be = PPStructureV3Backend(python_exe=None)
+        crop = np.full((40, 80, 3), 255, dtype=np.uint8)
+        with patch.object(be, "_can_run_inproc", return_value=False):
+            assert be.run(crop, {}, [], (0, 0)) is None
+
+    def test_enhance_regions_skips_inapplicable_region(self):
+        """With the V3 backend, an inapplicable (flowchart) region is skipped
+        before the (expensive) backend ever runs."""
+        import numpy as np
+        from processors.table_enhancer import TableEnhancer
+        cfg = {"ocr": {"table_structure": {"enhance_on_low_quality": True,
+                                           "backend": "ppstructurev3"}}}
+        enh = TableEnhancer(cfg, tier="ppstructurev3")
+        image = np.full((260, 340, 3), 255, dtype=np.uint8)
+        blocks = self._flowchart_blocks()
+        called = {"n": 0}
+
+        class _Backend:
+            name = "ppstructurev3"
+
+            def run(self, *a, **k):
+                called["n"] += 1
+                return "<table><tr><td>a</td><td>b</td></tr></table>"
+
+        enh._backend = _Backend()
+        regions = [{"bbox": [0, 0, 300, 200], "quality": 0.1, "n_cols": 3}]
+        out = enh.enhance_regions(image, regions, blocks=blocks)
+        assert out == []          # skipped -> human-review fallback preserved
+        assert called["n"] == 0   # backend never invoked
+
+    def test_enhance_regions_runs_on_applicable_region(self):
+        import numpy as np
+        from processors.table_enhancer import TableEnhancer
+        cfg = {"ocr": {"table_structure": {"enhance_on_low_quality": True,
+                                           "backend": "ppstructurev3"}}}
+        enh = TableEnhancer(cfg, tier="ppstructurev3")
+        image = np.full((200, 340, 3), 255, dtype=np.uint8)
+        blocks = self._regular_table_blocks()
+        called = {"n": 0}
+
+        class _Backend:
+            name = "ppstructurev3"
+
+            def run(self, *a, **k):
+                called["n"] += 1
+                return "<table><tr><td>a</td><td>b</td></tr><tr><td>1</td><td>2</td></tr></table>"
+
+        enh._backend = _Backend()
+        regions = [{"bbox": [0, 0, 300, 160], "quality": 0.1, "n_cols": 3}]
+        out = enh.enhance_regions(image, regions, blocks=blocks)
+        assert called["n"] == 1
+        assert len(out) == 1
+        assert out[0]["backend"] == "ppstructurev3"
+        assert out[0]["verdict"] == "compare"
+        assert out[0]["applicable"]["applicable"] is True
+
+
 class TestLinkHelpers:
     """Test link helper functions."""
     
