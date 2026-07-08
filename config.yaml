@@ -70,17 +70,23 @@ ocr:
     rebuild_max_regions: 6
     crop_pad: 14
     max_enhance_regions: 4
-    # --- PP-StructureV3 adopt gate (calibrated 2026-07-08) ---------------
+    # --- PP-StructureV3 adopt gate (calibrated 2026-07-08, 13 regions) ----
     # When enhance_adopt is true, an enhanced table may REPLACE the plan-B
     # table in the body (not just attach a compare block) if ALL hold:
     #   S_b < adopt_sb_max  AND  (S_e - S_b) >= enhance_adopt_margin  AND
     #   S_e >= adopt_se_min.  Otherwise it stays a review-only compare block.
-    # Default OFF -> review-only, byte-identical to before. Thresholds live
-    # here so they can be tuned without code changes.
+    # Calibration finding: on this host's PP-StructureV3, S_e (structure-only)
+    # does NOT track content correctness -- across all 6 successful sample
+    # regions the V3 table was not content-better than plan-B (e.g. 121125 r02
+    # scored S_e=0.886 but the matrix digits were still scrambled). So the
+    # thresholds are deliberately tightened to ZERO false-adopt on the sample:
+    # the gate is ready but will not trigger here until a stronger table model
+    # is available. Default OFF -> review-only, byte-identical to before.
+    # Thresholds live here so they can be tuned without code changes.
     enhance_adopt: false
-    enhance_adopt_margin: 0.15
-    adopt_sb_max: 0.62
-    adopt_se_min: 0.80
+    enhance_adopt_margin: 0.30
+    adopt_sb_max: 0.55
+    adopt_se_min: 0.90
   ollama:
     model: "qwen2.5:1.5b"
     endpoint: "http://localhost:11434"
