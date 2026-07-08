@@ -541,7 +541,14 @@ class TableEnhancer:
         self.ppstructurev3_python = ts.get("ppstructurev3_python", "") or None
         # Tier resolution order: explicit config override > passed tier > gridboost.
         self.tier = ts.get("backend") or tier or "gridboost"
-        self.adopt_margin = float(ts.get("enhance_adopt_margin", 0.1))
+        # Adopt gate (calibrated): when enhance_adopt is on, an enhanced table
+        # may REPLACE the plan-B table in the body if S_b < adopt_sb_max AND
+        # (S_e - S_b) >= adopt_margin AND S_e >= adopt_se_min; else it stays a
+        # review-only compare block. Default off => always "compare".
+        self.adopt_enabled = bool(ts.get("enhance_adopt", False))
+        self.adopt_margin = float(ts.get("enhance_adopt_margin", 0.15))
+        self.adopt_sb_max = float(ts.get("adopt_sb_max", 0.62))
+        self.adopt_se_min = float(ts.get("adopt_se_min", 0.80))
         self._backend = None
 
     def _get_backend(self):
@@ -615,6 +622,7 @@ class TableEnhancer:
                 continue
             se = enhanced_quality(html)
             sb = float(region.get("quality", 0.0))
+            verdict = self._adopt_verdict(sb, se["score"])
             item = {
                 "html": html,
                 "region": region,
@@ -622,12 +630,29 @@ class TableEnhancer:
                 "backend": self.tier,
                 "score_enhanced": round(se["score"], 3),
                 "score_base": round(sb, 3),
-                "verdict": "compare",  # review-only this round; adopt gate reserved
+                "verdict": verdict,  # "adopt" (replace body) or "compare" (review-only)
             }
             if self.tier == "ppstructurev3":
                 item["applicable"] = self._v3_applicable(region, region_blocks)
             results.append(item)
         return results
+
+    def _adopt_verdict(self, score_base, score_enhanced):
+        """Decide whether an enhanced table may replace the plan-B table.
+
+        Returns "adopt" only when the adopt gate is enabled AND all calibrated
+        thresholds pass; otherwise "compare" (review-only, main output kept).
+        Note: S_e is a structure-only score, so callers should still keep the
+        human-review affordance; this gate is intentionally conservative.
+        """
+        if not self.adopt_enabled:
+            return "compare"
+        gain = float(score_enhanced) - float(score_base)
+        if (float(score_base) < self.adopt_sb_max
+                and gain >= self.adopt_margin
+                and float(score_enhanced) >= self.adopt_se_min):
+            return "adopt"
+        return "compare"
 
     # Dense-matrix / flowchart guard rails for PP-StructureV3 applicability.
     _V3_MIN_ROWS = 3

@@ -1050,15 +1050,22 @@ ocr_confidence: {confidence:.2f}
                 "quality": round(quality["score"], 3),
                 "n_cols": int(quality["n_cols"]),
             })
-            parts.append(
-                "> [!warning] 表格结构复杂，普通方式识别置信度低"
-                f"（quality={quality['score']:.2f}, 列数={int(quality['n_cols'])}）。"
-                "已尽力还原，建议启用增强识别（PP-Structure）或人工核对原图。"
-            )
-            parts.append(table_md)
-            enhanced = self._enhanced_block_for_region(bbox)
-            if enhanced:
-                parts.append(enhanced)
+            adopted = self._adopted_table_for_region(bbox)
+            if adopted:
+                # Adopt gate passed: the enhanced table REPLACES the plan-B
+                # table and the low-confidence warning. Front matter/title are
+                # unchanged. Only reachable when enhance_adopt is enabled.
+                parts.append(adopted)
+            else:
+                parts.append(
+                    "> [!warning] 表格结构复杂，普通方式识别置信度低"
+                    f"（quality={quality['score']:.2f}, 列数={int(quality['n_cols'])}）。"
+                    "已尽力还原，建议启用增强识别（PP-Structure）或人工核对原图。"
+                )
+                parts.append(table_md)
+                enhanced = self._enhanced_block_for_region(bbox)
+                if enhanced:
+                    parts.append(enhanced)
         else:
             parts.append(table_md)
         parts.append(side_notes)
@@ -1091,15 +1098,10 @@ ocr_confidence: {confidence:.2f}
         union = area_a + area_b - inter
         return inter / union if union > 0 else 0.0
 
-    def _enhanced_block_for_region(self, bbox: List[int]) -> str:
-        """Attach the plan-A (PP-Structure) result for a low-confidence region.
-
-        The enhanced table is emitted as a review-only supplement under the
-        warning; it never replaces the plan-B main output, so enabling plan A
-        can only add information (zero regression on the primary rendering).
-        """
+    def _match_enhanced_item(self, bbox):
+        """Return the best-matching enhanced-table item (IoU >= 0.5) or None."""
         if not self._enhanced_tables:
-            return ""
+            return None
         best = None
         best_iou = 0.0
         for item in self._enhanced_tables:
@@ -1111,6 +1113,45 @@ ocr_confidence: {confidence:.2f}
             if iou > best_iou:
                 best_iou, best = iou, item
         if best is None or best_iou < 0.5:
+            return None
+        return best
+
+    def _adopted_table_for_region(self, bbox: List[int]) -> str:
+        """If a matching enhanced table has verdict=="adopt", return it as the
+        replacement body (with an adopt note). Otherwise return "" so the
+        caller keeps the plan-B table + review-only compare block.
+
+        Only reachable when the adopt gate is enabled (verdict is "compare"
+        otherwise), so default behavior is byte-identical to before.
+        """
+        best = self._match_enhanced_item(bbox)
+        if not best or best.get("verdict") != "adopt":
+            return ""
+        markdown_table = self._html_table_to_markdown(best.get("html", ""))
+        if not markdown_table:
+            return ""
+        engine_label = "PP-Structure"
+        if (best.get("backend") == "ppstructurev3"
+                or best.get("engine") == "ppstructurev3"):
+            engine_label = "PP-StructureV3"
+        sb = best.get("score_base")
+        se = best.get("score_enhanced")
+        note = (
+            "> [!note] 本表由" + engine_label
+            + "重识别并通过采纳闸门替换原普通识别结果"
+            + ("（S_b=%s, S_e=%s）。建议人工复核内容。" % (sb, se))
+        )
+        return note + "\n\n" + markdown_table
+
+    def _enhanced_block_for_region(self, bbox: List[int]) -> str:
+        """Attach the plan-A (PP-Structure) result for a low-confidence region.
+
+        The enhanced table is emitted as a review-only supplement under the
+        warning; it never replaces the plan-B main output, so enabling plan A
+        can only add information (zero regression on the primary rendering).
+        """
+        best = self._match_enhanced_item(bbox)
+        if best is None:
             return ""
         markdown_table = self._html_table_to_markdown(best.get("html", ""))
         if not markdown_table:

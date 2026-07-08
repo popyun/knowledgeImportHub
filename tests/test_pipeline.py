@@ -634,6 +634,109 @@ class TestVisionLocalBackend:
             assert be.run(self._crop(), {}, [], (0, 0)) is None
 
 
+class TestAdoptGate:
+    """PP-StructureV3 adopt gate: verdict thresholds + body replace vs compare."""
+
+    def _enh_on(self, **over):
+        ts = {"enhance_on_low_quality": True, "backend": "ppstructurev3",
+              "enhance_adopt": True, "enhance_adopt_margin": 0.15,
+              "adopt_sb_max": 0.62, "adopt_se_min": 0.80}
+        ts.update(over)
+        from processors.table_enhancer import TableEnhancer
+        return TableEnhancer({"ocr": {"table_structure": ts}}, tier="ppstructurev3")
+
+    def test_verdict_defaults_to_compare_when_adopt_off(self):
+        from processors.table_enhancer import TableEnhancer
+        enh = TableEnhancer(
+            {"ocr": {"table_structure": {"enhance_on_low_quality": True,
+                                         "backend": "ppstructurev3"}}},
+            tier="ppstructurev3")
+        assert enh.adopt_enabled is False
+        assert enh._adopt_verdict(0.40, 0.95) == "compare"
+
+    def test_verdict_adopt_when_all_thresholds_pass(self):
+        enh = self._enh_on()
+        assert enh._adopt_verdict(0.40, 0.90) == "adopt"
+
+    def test_verdict_compare_when_gain_too_small(self):
+        enh = self._enh_on()
+        assert enh._adopt_verdict(0.60, 0.70) == "compare"
+
+    def test_verdict_compare_when_sb_too_high(self):
+        enh = self._enh_on()
+        assert enh._adopt_verdict(0.70, 0.95) == "compare"
+
+    def test_verdict_compare_when_se_below_floor(self):
+        enh = self._enh_on()
+        assert enh._adopt_verdict(0.40, 0.78) == "compare"
+
+    def test_thresholds_are_config_driven(self):
+        enh = self._enh_on(adopt_sb_max=0.9, enhance_adopt_margin=0.05, adopt_se_min=0.5)
+        assert enh._adopt_verdict(0.70, 0.80) == "adopt"
+
+    def _gen(self):
+        from processors.markdown_generator import MarkdownGenerator
+        return MarkdownGenerator({})
+
+    def _cell(self, cx, cy, w=30, h=18):
+        x0, x1 = cx - w / 2, cx + w / 2
+        y0, y1 = cy - h / 2, cy + h / 2
+        return {"type": "text", "text": "x", "confidence": 0.9,
+                "bbox": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]}
+
+    def _low_quality_rows(self):
+        anchors = [10 + i * 60 for i in range(14)]
+        rows = []
+        for y in (10, 40, 70, 100):
+            row = [self._cell(a, y) for a in anchors]
+            row.append(self._cell(18, y))
+            row.append(self._cell(78, y))
+            rows.append(row)
+        return rows
+
+    def _prime_region(self, gen, rows):
+        gen._enhanced_tables = []
+        gen._low_quality_regions = []
+        gen._table_quality_log = []
+        gen._render_markdown_table(rows)
+        assert gen._low_quality_regions
+        return gen._low_quality_regions[0]["bbox"]
+
+    def test_adopt_replaces_body_and_drops_warning(self):
+        gen = self._gen()
+        rows = self._low_quality_rows()
+        bbox = self._prime_region(gen, rows)
+        gen._enhanced_tables = [{
+            "html": "<table><tr><td>c1</td><td>c2</td></tr><tr><td>a</td><td>b</td></tr></table>",
+            "region": {"bbox": bbox}, "engine": "ppstructurev3",
+            "backend": "ppstructurev3", "verdict": "adopt",
+            "score_base": 0.43, "score_enhanced": 0.89,
+        }]
+        gen._low_quality_regions = []
+        gen._table_quality_log = []
+        md = gen._render_markdown_table(rows)
+        assert "[!warning]" not in md
+        assert "[!note]" in md
+        assert "| c1 | c2 |" in md
+
+    def test_compare_keeps_body_and_attaches_tip(self):
+        gen = self._gen()
+        rows = self._low_quality_rows()
+        bbox = self._prime_region(gen, rows)
+        gen._enhanced_tables = [{
+            "html": "<table><tr><td>c1</td><td>c2</td></tr></table>",
+            "region": {"bbox": bbox}, "engine": "ppstructurev3",
+            "backend": "ppstructurev3", "verdict": "compare",
+            "score_base": 0.60, "score_enhanced": 0.70,
+        }]
+        gen._low_quality_regions = []
+        gen._table_quality_log = []
+        md = gen._render_markdown_table(rows)
+        assert "[!warning]" in md
+        assert "[!tip]" in md
+        assert "[!note]" not in md
+
+
 class TestPPStructureV3Backend:
     """PP-StructureV3 enhancement backend: selection + applicability + degrade."""
 

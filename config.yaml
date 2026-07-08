@@ -70,8 +70,17 @@ ocr:
     rebuild_max_regions: 6
     crop_pad: 14
     max_enhance_regions: 4
-    # Reserved for a future adopt gate; review-only comparison this round.
-    enhance_adopt_margin: 0.1
+    # --- PP-StructureV3 adopt gate (calibrated 2026-07-08) ---------------
+    # When enhance_adopt is true, an enhanced table may REPLACE the plan-B
+    # table in the body (not just attach a compare block) if ALL hold:
+    #   S_b < adopt_sb_max  AND  (S_e - S_b) >= enhance_adopt_margin  AND
+    #   S_e >= adopt_se_min.  Otherwise it stays a review-only compare block.
+    # Default OFF -> review-only, byte-identical to before. Thresholds live
+    # here so they can be tuned without code changes.
+    enhance_adopt: false
+    enhance_adopt_margin: 0.15
+    adopt_sb_max: 0.62
+    adopt_se_min: 0.80
   ollama:
     model: "qwen2.5:1.5b"
     endpoint: "http://localhost:11434"
