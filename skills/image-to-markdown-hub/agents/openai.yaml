@@ -1,0 +1,6 @@
+interface:
+  display_name: "Image to Markdown (Hub)"
+  short_description: "Image to Obsidian Markdown with links"
+  default_prompt: "Use $image-to-markdown-hub to convert this document image into Obsidian Markdown with inline wiki-links."
+policy:
+  allow_implicit_invocation: true
