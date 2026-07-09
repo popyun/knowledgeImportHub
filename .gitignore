@@ -40,3 +40,6 @@ host_profile.local.json
 _an.py
 _mainenv_baseline.txt
 _regbaseline/
+
+# Skills now live in their own repo (popyun/image-to-markdown-skills)
+skills/
