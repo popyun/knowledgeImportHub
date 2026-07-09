@@ -1,6 +1,0 @@
-interface:
-  display_name: "Image to Markdown (Lite)"
-  short_description: "Portable image to Markdown with links"
-  default_prompt: "Use $image-to-markdown-lite to convert this document image into portable Markdown with inline wiki-links."
-policy:
-  allow_implicit_invocation: true
