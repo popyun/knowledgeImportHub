@@ -2,9 +2,10 @@
 
 English | [中文](README.zh-CN.md)
 
-A production-ready OCR-to-Obsidian import system that automatically processes
-images containing tables, mixed languages, and special characters, publishing
-structured Markdown notes into an Obsidian vault.
+A locally run OCR-to-Obsidian workflow for document images containing tables,
+mixed languages, and special characters. The main pipeline publishes structured
+Markdown notes to an Obsidian review folder; optional table enhancement remains
+experimental and is off by default.
 
 ## Features
 
@@ -12,7 +13,7 @@ structured Markdown notes into an Obsidian vault.
 - **Multi-Engine OCR**: Routes to PaddleOCR / MinerU / Mathpix based on content type
 - **Layout-Aware Reconstruction**: Rebuilds titles, reading-order regions, and tables from OCR blocks
 - **Table Reconstruction**: Preserves cell colors and generates tables (Markdown and HTML with `bgcolor`)
-- **Tiered Table Enhancement (Plan A)**: An optional, review-only pass re-recognizes low-confidence table regions using a host-selected backend (`gridboost` / `vision` / `manual`); off by default and never replaces the primary output
+- **Tiered Table Enhancement (Plan A)**: An optional pass re-recognizes low-confidence table regions using a host-selected backend (`gridboost` / `vision` / `manual`); off by default, with comparison output unless the separate adoption gate is explicitly enabled and its thresholds pass
 - **Noise Filtering**: Editor toolbars / PPT headers / footers are moved to a review block with reasons, not discarded
 - **LLM Post-Correction**: Uses a local Ollama model for OCR error correction
 - **Smart Linking**: Auto-generates wiki-links to existing Obsidian notes
@@ -91,7 +92,7 @@ ocr:
 
 ## Tiered Table Enhancement (Plan A)
 
-For colored/borderless slides where the geometric reconstruction produces a low-confidence table, an optional enhancement pass can re-recognize just that region and attach the result as a review-only comparison block. It is **off by default** and **never replaces** the primary output, so enabling it can only add information (zero regression on the main rendering).
+For colored/borderless slides where the geometric reconstruction produces a low-confidence table, an optional enhancement pass can re-recognize just that region. It is **off by default**. With the default `enhance_adopt: false`, the result is attached for human comparison and the primary output remains unchanged. If `enhance_adopt` is explicitly enabled, an enhanced table may replace the primary table only when the configured quality thresholds pass; review the result before relying on it.
 
 On first run the pipeline probes host capability once and caches the result to `host_profile.local.json`, mapping it to one of three tiers:
 
